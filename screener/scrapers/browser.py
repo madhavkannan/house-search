@@ -60,7 +60,7 @@ def _fetch_scrapingbee(url: str, retries: int = 3) -> str | None:
                     "country_code": "sg",
                     "timeout": "30000",
                 },
-                timeout=60,
+                timeout=120,  # premium_proxy + render_js can take 60-90s
             )
             if resp.status_code == 200:
                 html = resp.text

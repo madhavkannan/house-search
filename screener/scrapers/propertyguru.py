@@ -76,6 +76,17 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
     try:
         data = json.loads(script_tag.string)
         page_props = data["props"]["pageProps"]
+
+        # Log top-level keys + one level deep so we can find where listings live
+        top_keys = list(page_props.keys())
+        logger.info(f"[PropertyGuru] pageProps keys: {top_keys}")
+        for k in top_keys:
+            v = page_props[k]
+            if isinstance(v, dict):
+                logger.info(f"[PropertyGuru]   pageProps.{k} keys: {list(v.keys())}")
+            elif isinstance(v, list):
+                logger.info(f"[PropertyGuru]   pageProps.{k}: list len={len(v)}")
+
         raw_listings = (
             page_props.get("listings")
             or page_props.get("searchListingData", {}).get("listings", [])
