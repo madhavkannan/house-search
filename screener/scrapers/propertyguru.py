@@ -78,8 +78,6 @@ def _first_image(raw: dict) -> str | None:
 
 
 def _build_params(page: int) -> dict:
-    # _build_url keeps literal [] so ScrapingBee receives district_code[]=9&... correctly.
-    district_nums = [d.lstrip("D").lstrip("0") or "0" for d in sorted(DISTRICTS)]
     return {
         "listing_type": "sale",
         "search": "true",
@@ -90,7 +88,6 @@ def _build_params(page: int) -> dict:
         "sort": "date",
         "order": "desc",
         "page": page,
-        "district_code[]": district_nums,
     }
 
 
@@ -130,21 +127,8 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
             or len(raw_listings)
         )
 
-        if raw_listings:
-            r0 = raw_listings[0]
-            logger.info(f"[PG-DIAG] keys: {list(r0.keys())}")
-            logger.info(f"[PG-DIAG] fullAddress: {r0.get('fullAddress')}")
-            logger.info(f"[PG-DIAG] listingFeatures: {str(r0.get('listingFeatures'))[:300]}")
-            logger.info(f"[PG-DIAG] thumbnail: {str(r0.get('thumbnail'))[:200]}")
-        else:
+        if not raw_listings:
             logger.warning("[PropertyGuru] No listings found in any known path")
-            result_count = page_data.get("resultCount", "?") if isinstance(page_data, dict) else "?"
-            logger.warning(f"[PG-DIAG] resultCount={result_count}")
-            lw = data_section.get("listingsData") if isinstance(data_section, dict) else None
-            logger.warning(f"[PG-DIAG] listingsData type={type(lw).__name__} len={len(lw) if isinstance(lw, list) else 'N/A'}")
-            if isinstance(lw, list) and lw:
-                logger.warning(f"[PG-DIAG] listingsData[0] keys: {list(lw[0].keys()) if isinstance(lw[0], dict) else lw[0]}")
-            logger.warning(f"[PG-DIAG] data_section keys: {list(data_section.keys()) if isinstance(data_section, dict) else data_section}")
 
         return raw_listings, total
     except (json.JSONDecodeError, KeyError, TypeError) as e:
@@ -295,9 +279,8 @@ class PropertyGuruScraper:
         page = 1
 
         while True:
-            params = _build_params(page)
-            logger.info(f"[PropertyGuru] Fetching page {page} districts={params.get('district_code[]')}...")
-            html = fetch_html(PG_SEARCH_URL, params=params)
+            logger.info(f"[PropertyGuru] Fetching page {page}...")
+            html = fetch_html(PG_SEARCH_URL, params=_build_params(page))
             if html is None:
                 logger.error("[PropertyGuru] Scrape aborted — no response")
                 break

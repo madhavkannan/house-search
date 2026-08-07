@@ -22,7 +22,7 @@ ONEMAP_SEARCH_URL = "https://www.onemap.gov.sg/api/common/elastic/search"
 
 PG_SEARCH_URL = "https://www.propertyguru.com.sg/property-for-sale"
 PG_PROPERTY_TYPES = ["CONDO", "APT"]
-PG_MAX_PAGES = 3  # premium_proxy=true costs 25 credits/req; 3 pages × 2 runs/day × 30d = 4500 — upgrade from free tier if needed
+PG_MAX_PAGES = 5
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",

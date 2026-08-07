@@ -81,11 +81,16 @@ def main() -> None:
     excluded = 0
     for listing in new_listings:
         listing = _enrich(listing, pg_scraper)
+        # Drop if we have no location signal at all — can't verify district
+        if not listing.geocode_ok and not listing.district:
+            excluded += 1
+            logger.info(f"Excluded (no location): {listing.source_id} '{listing.address}'")
+            continue
         if not passes_hard_criteria(listing):
             excluded += 1
             logger.info(
                 f"Excluded post-enrich: {listing.source_id} "
-                f"shelter={listing.shelter_status} baths={listing.bathrooms}"
+                f"district={listing.district} shelter={listing.shelter_status} baths={listing.bathrooms}"
             )
             continue
         if upsert_listing(listing):
