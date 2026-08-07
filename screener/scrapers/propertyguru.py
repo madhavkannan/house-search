@@ -39,6 +39,19 @@ def _extract_postal(text: str | None) -> str | None:
     return m.group(1) if m else None
 
 
+def _extract_district_from_address(text: str | None) -> str:
+    """Extract district from strings like 'Katong (D15)' or 'North (D25-28)'."""
+    if not text:
+        return ""
+    m = re.search(r"\(D(\d+)", text)
+    if m:
+        try:
+            return f"D{int(m.group(1)):02d}"
+        except ValueError:
+            pass
+    return ""
+
+
 def _first_image(raw: dict) -> str | None:
     # New structure: mediaItems list of dicts
     for item in (raw.get("mediaItems") or []):
@@ -186,16 +199,25 @@ def _parse_listing(raw: dict) -> Listing:
 
     # --- property sub-dict: district, postal, tenure, description, size ---
     prop = raw.get("property") or {}
+    if prop and not hasattr(_parse_listing, "_prop_logged"):
+        logger.info(f"[PropertyGuru] property keys: {list(prop.keys())[:20]}")
+        logger.info(f"[PropertyGuru] property sample: {str(prop)[:400]}")
+        _parse_listing._prop_logged = True  # type: ignore[attr-defined]
 
-    district = _normalize_district(
-        prop.get("district") or prop.get("districtCode") or prop.get("district_code")
-        or raw.get("district") or raw.get("district_code")
+    full_address = raw.get("fullAddress") or raw.get("shortAddress") or ""
+
+    district = (
+        _normalize_district(
+            prop.get("district") or prop.get("districtCode") or prop.get("district_code")
+            or prop.get("districtId") or raw.get("district") or raw.get("district_code")
+        )
+        or _extract_district_from_address(full_address)
     )
 
     postal = (
-        prop.get("postalCode") or prop.get("postal_code")
+        prop.get("postalCode") or prop.get("postal_code") or prop.get("postCode")
         or raw.get("postalCode") or raw.get("postal_code")
-        or _extract_postal(raw.get("fullAddress") or raw.get("shortAddress"))
+        or _extract_postal(full_address)
     )
 
     tenure_raw = prop.get("tenure") or prop.get("tenureText") or raw.get("tenure")
@@ -218,10 +240,7 @@ def _parse_listing(raw: dict) -> Listing:
                 pass
 
     # --- Address & project name ---
-    address = str(
-        raw.get("fullAddress") or raw.get("shortAddress")
-        or prop.get("address") or raw.get("address") or ""
-    )
+    address = str(full_address or prop.get("address") or raw.get("address") or "")
     project_name = str(
         raw.get("localizedTitle") or prop.get("projectName") or prop.get("name")
         or raw.get("project_name") or raw.get("listingName") or ""
