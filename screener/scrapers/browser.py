@@ -6,7 +6,7 @@ Page fetcher with two strategies:
 import logging
 import os
 import time
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import requests as _requests
 
@@ -22,14 +22,19 @@ _PW_UA = (
 )
 
 
+def _build_url(base: str, params: dict) -> str:
+    # urlencode encodes [] as %5B%5D — ScrapingBee rejects URLs with percent-encoded brackets.
+    # Keep literal [] so array-style params reach PropertyGuru correctly.
+    qs = urlencode(params, doseq=True, quote_via=quote).replace("%5B%5D", "[]")
+    return f"{base}?{qs}"
+
+
 def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 90_000) -> str | None:
     """
     Fetch a page and return its rendered HTML.
     Tries ScrapingBee first (when API key present), falls back to Playwright.
     """
-    full_url = url
-    if params:
-        full_url = f"{url}?{urlencode(params, doseq=True)}"
+    full_url = _build_url(url, params) if params else url
 
     if SCRAPINGBEE_API_KEY:
         return _fetch_scrapingbee(full_url)
