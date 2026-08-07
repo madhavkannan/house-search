@@ -4,7 +4,7 @@ import sys
 from screener.db_writer import get_seen_ids, upsert_listing
 from screener.deduplicator import deduplicate
 from screener.filters import passes_hard_criteria
-from screener.geocoder import geocode
+from screener.geocoder import geocode, postal_to_district
 from screener.models import Listing
 from screener.mrt import mrt_within_walk
 from screener.schools import schools_within_radius
@@ -30,14 +30,22 @@ def _enrich(listing: Listing, pg_scraper: PropertyGuruScraper) -> Listing:
         listing = pg_scraper.fetch_detail(listing)
 
     # 3. Geocode + nearby schools/MRT
-    coords = geocode(listing.address, listing.postal_code)
-    if coords is None and listing.project_name:
-        coords = geocode(listing.project_name, listing.postal_code)
-    if coords:
-        listing.lat, listing.lng = coords
+    geo = geocode(listing.address, listing.postal_code)
+    if geo is None and listing.project_name:
+        geo = geocode(listing.project_name, listing.postal_code)
+    if geo:
+        lat, lng, onemap_postal = geo
+        listing.lat, listing.lng = lat, lng
         listing.geocode_ok = True
-        listing.nearby_schools = schools_within_radius(*coords)
-        listing.nearby_mrt = mrt_within_walk(*coords)
+        # Backfill postal and district from OneMap if scraper couldn't determine them
+        if onemap_postal and not listing.postal_code:
+            listing.postal_code = onemap_postal
+        if not listing.district:
+            postal_for_district = listing.postal_code or onemap_postal
+            if postal_for_district:
+                listing.district = postal_to_district(postal_for_district)
+        listing.nearby_schools = schools_within_radius(lat, lng)
+        listing.nearby_mrt = mrt_within_walk(lat, lng)
     else:
         logger.warning(f"[main] Geocoding failed for '{listing.address}'")
 
