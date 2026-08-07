@@ -151,7 +151,7 @@ class PropertyGuruScraper:
         page = 1
 
         while True:
-            logger.info(f"[PropertyGuru] Fetching page {page} via Playwright...")
+            logger.info(f"[PropertyGuru] Fetching page {page}...")
             html = fetch_html(PG_SEARCH_URL, params=_build_params(page))
             if html is None:
                 logger.error("[PropertyGuru] Scrape aborted — no response")

@@ -5,6 +5,7 @@ Page fetcher with two strategies:
 """
 import logging
 import os
+import time
 from urllib.parse import urlencode
 
 import requests as _requests
@@ -35,37 +36,49 @@ def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 90_000) -
     return _fetch_playwright(full_url, timeout_ms)
 
 
-def _fetch_scrapingbee(url: str) -> str | None:
+def _fetch_scrapingbee(url: str, retries: int = 3) -> str | None:
     """
     Fetch via ScrapingBee API — residential IPs, JS rendering.
     Free tier: 1000 credits/month. render_js=true costs 5 credits/request.
+    HTTP 500 from ScrapingBee means their server errored (not charged) — retries are safe.
     """
-    try:
-        resp = _requests.get(
-            SCRAPINGBEE_URL,
-            params={
-                "api_key": SCRAPINGBEE_API_KEY,
-                "url": url,
-                "render_js": "true",
-                "wait": "4000",          # ms to wait after page load
-                "country_code": "sg",    # Singapore exit node
-                "block_ads": "true",
-                "block_resources": "false",  # keep JS/CSS so Cloudflare challenge runs
-                "timeout": "30000",
-            },
-            timeout=60,
-        )
-        if resp.status_code == 200:
-            html = resp.text
-            if "Just a moment" in html or "cf-browser-verification" in html:
-                logger.warning("[scrapingbee] Cloudflare challenge page returned")
-            logger.info(f"[scrapingbee] Fetched {len(html):,} chars from {url[:80]}")
-            return html
-        logger.error(f"[scrapingbee] HTTP {resp.status_code}: {resp.text[:200]}")
-        return None
-    except Exception as e:
-        logger.error(f"[scrapingbee] Request failed: {e}")
-        return None
+    for attempt in range(1, retries + 1):
+        try:
+            resp = _requests.get(
+                SCRAPINGBEE_URL,
+                params={
+                    "api_key": SCRAPINGBEE_API_KEY,
+                    "url": url,
+                    "render_js": "true",
+                    "wait": "4000",          # ms to wait after page load
+                    "country_code": "sg",    # Singapore exit node
+                    "block_ads": "true",
+                    "block_resources": "false",  # keep JS/CSS so Cloudflare challenge runs
+                    "timeout": "30000",
+                },
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                html = resp.text
+                if "Just a moment" in html or "cf-browser-verification" in html:
+                    logger.warning("[scrapingbee] Cloudflare challenge page returned")
+                logger.info(f"[scrapingbee] Fetched {len(html):,} chars from {url[:80]}")
+                return html
+            if resp.status_code == 500:
+                logger.warning(
+                    f"[scrapingbee] HTTP 500 (attempt {attempt}/{retries}): {resp.text[:200]}"
+                )
+                if attempt < retries:
+                    time.sleep(2 ** attempt)
+                    continue
+            else:
+                logger.error(f"[scrapingbee] HTTP {resp.status_code}: {resp.text[:200]}")
+                return None
+        except Exception as e:
+            logger.error(f"[scrapingbee] Request failed (attempt {attempt}/{retries}): {e}")
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+    return None
 
 
 def _fetch_playwright(url: str, timeout_ms: int) -> str | None:
