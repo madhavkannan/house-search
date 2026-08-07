@@ -78,8 +78,8 @@ def _first_image(raw: dict) -> str | None:
 
 
 def _build_params(page: int) -> dict:
-    # Omit array-style params (property_type_code[], district_code[]) — ScrapingBee rejects
-    # URLs containing [] in parameter names. District/type filtering happens in passes_hard_criteria.
+    # _build_url keeps literal [] so ScrapingBee receives district_code[]=9&... correctly.
+    district_nums = [d.lstrip("D").lstrip("0") or "0" for d in sorted(DISTRICTS)]
     return {
         "listing_type": "sale",
         "search": "true",
@@ -90,6 +90,8 @@ def _build_params(page: int) -> dict:
         "sort": "date",
         "order": "desc",
         "page": page,
+        "district_code[]": district_nums,
+        "property_type_code[]": PG_PROPERTY_TYPES,
     }
 
 
@@ -309,11 +311,11 @@ class PropertyGuruScraper:
                     prop = raw.get("property") or {}
                     sub_type = prop.get("subTypeText") or prop.get("typeText") or ""
                     type_group = prop.get("typeGroup") or ""
-                    # Skip HDB and landed residential
-                    if type_group == "H" or sub_type in (
-                        "HDB Flat", "Terrace House", "Semi-Detached House",
-                        "Bungalow", "Good Class Bungalow", "Cluster House",
-                        "Corner Terrace", "Land Only", "Walk-up Apartment",
+                    # Skip HDB (H) and landed residential (L)
+                    if type_group in ("H", "L") or sub_type in (
+                        "HDB Flat", "Terrace House", "Terraced House",
+                        "Semi-Detached House", "Bungalow", "Good Class Bungalow",
+                        "Cluster House", "Corner Terrace", "Land Only", "Walk-up Apartment",
                     ):
                         continue
                     listings.append(_parse_listing(raw))
