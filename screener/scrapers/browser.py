@@ -135,8 +135,8 @@ def _fetch_playwright(url: str, timeout_ms: int) -> str | None:
                 Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
                 window.chrome={runtime:{}};
             """)
-            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-            page.wait_for_timeout(3000)
+            page.goto(url, wait_until="load", timeout=timeout_ms)
+            page.wait_for_timeout(4000)
             html = page.content()
             browser.close()
             if "Just a moment" in html or "cf-browser-verification" in html:
