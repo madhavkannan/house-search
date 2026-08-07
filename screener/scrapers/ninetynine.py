@@ -138,8 +138,11 @@ class NinetyNineScraper(BaseScraper):
             logger.warning("[99co] playwright not installed")
             return []
 
+        from urllib.parse import urlparse
+
         captured: list[dict] = []
         total = 0
+        discovered_api_url: list[str] = []  # mutable container for closure
 
         _PW_UA = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -147,26 +150,14 @@ class NinetyNineScraper(BaseScraper):
             "Chrome/126.0.0.0 Safari/537.36"
         )
 
-        search_url = (
-            f"{_NCO_SEARCH_PAGE}"
-            f"?listing_type=sale"
-            f"&main_category=residential"
-            f"&sub_categories[]=condo"
-            f"&sub_categories[]=apartment"
-            f"&price_max={MAX_PRICE}"
-            f"&bedrooms_min={MIN_BEDROOMS}"
-            f"&bathrooms_min={MIN_BATHROOMS}"
-            f"&floor_area_min={int(MIN_SIZE_SQFT / SQM_TO_SQFT)}"
-            f"&floor_area_type=sqm"
-            f"&sort_by=posted_at&order=desc"
-            + "".join(f"&districts[]={d}" for d in DISTRICT_INTS)
-        )
+        # Load the plain search page — the parameterised URL 404s.
+        # The page fires an XHR whose URL reveals the real listings API endpoint.
+        search_url = _NCO_SEARCH_PAGE
 
         def _handle_response(response):
             nonlocal total
             url = response.url
             ct = response.headers.get("content-type", "")
-            # Log ALL 99.co/99group JSON responses so we can see what URLs fire
             if "99.co" in url or "99group" in url:
                 logger.info(f"[99co-diag] {response.status} {ct[:40]} {url[:120]}")
             if not ("99.co" in url or "99group" in url):
@@ -177,7 +168,6 @@ class NinetyNineScraper(BaseScraper):
                 return
             try:
                 body = response.json()
-                # Log top-level keys so we can see the shape even if listings are 0
                 logger.info(f"[99co-diag] JSON keys: {list(body.keys())[:10]} from {url[:80]}")
                 listings_found = (
                     (body.get("data") or {}).get("listings")
@@ -195,6 +185,12 @@ class NinetyNineScraper(BaseScraper):
                     )
                     if t:
                         total = t
+                    # Record base URL (path only, no query) for pagination
+                    if not discovered_api_url:
+                        parsed = urlparse(url)
+                        discovered_api_url.append(
+                            f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                        )
                     logger.info(
                         f"[99co] Intercepted {len(listings_found)} listings "
                         f"from {url[:100]}"
@@ -219,7 +215,7 @@ class NinetyNineScraper(BaseScraper):
                 pg.add_init_script(
                     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
                 )
-                logger.info(f"[99co] Loading search page via Playwright intercept...")
+                logger.info("[99co] Loading search page via Playwright intercept...")
                 pg.goto(search_url, wait_until="load", timeout=90_000)
                 pg.wait_for_timeout(8000)
                 browser.close()
@@ -227,7 +223,50 @@ class NinetyNineScraper(BaseScraper):
             logger.error(f"[99co] Playwright intercept failed: {e}")
             return []
 
-        logger.info(f"[99co] Intercepted total {len(captured)} listings (reported total={total})")
+        logger.info(
+            f"[99co] Intercepted {len(captured)} listings from page 1 "
+            f"(reported total={total}); api_url={discovered_api_url[0] if discovered_api_url else 'none'}"
+        )
+
+        # If we found the real API URL, paginate the remaining pages with our filters
+        if discovered_api_url and total > PAGE_SIZE:
+            api_url = discovered_api_url[0]
+            logger.info(f"[99co] Paginating via discovered API: {api_url}")
+            page = 2
+            while page * PAGE_SIZE < total:
+                resp = self._get(
+                    api_url,
+                    params=self._api_params(page),
+                    headers={
+                        "Accept": "application/json",
+                        "Referer": _NCO_SEARCH_PAGE,
+                        "X-Requested-With": "XMLHttpRequest",
+                    },
+                    accept="application/json",
+                    retries=2,
+                )
+                if resp is None:
+                    logger.warning(f"[99co] Pagination failed at page {page}")
+                    break
+                try:
+                    body = resp.json()
+                    data = body.get("data", {})
+                    raw_listings = (
+                        data.get("listings")
+                        or body.get("listings")
+                        or (body.get("result") or {}).get("listings")
+                        or []
+                    )
+                    if not raw_listings:
+                        break
+                    captured.extend(raw_listings)
+                    logger.info(f"[99co] Paginated page {page}: {len(raw_listings)} listings")
+                    page += 1
+                    time.sleep(random.uniform(5, 10))
+                except Exception as e:
+                    logger.warning(f"[99co] Pagination parse error page {page}: {e}")
+                    break
+
         listings: list[Listing] = []
         for raw in captured:
             try:
