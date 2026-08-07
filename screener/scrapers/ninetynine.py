@@ -11,8 +11,6 @@ from screener.config import (
 )
 from screener.models import Listing
 from screener.scrapers.base import BaseScraper
-from screener.scrapers.browser import fetch_html
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -128,85 +126,116 @@ class NinetyNineScraper(BaseScraper):
 
         return listings
 
-    def _scrape_via_html(self) -> list[Listing]:
-        """Fall back: scrape 99.co search HTML using Playwright + __NEXT_DATA__."""
-        listings: list[Listing] = []
-        page = 1
+    def _scrape_via_intercept(self) -> list[Listing]:
+        """
+        Load 99.co in Playwright and intercept the XHR that fetches listings.
+        99.co is client-side rendered — __NEXT_DATA__ has no listings, but the
+        page fires an API call we can capture via response interception.
+        """
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            logger.warning("[99co] playwright not installed")
+            return []
 
-        while True:
-            params = {
-                "listing_type": "sale",
-                "main_category": "residential",
-                "sub_categories[]": ["condo", "apartment"],
-                "price_max": MAX_PRICE,
-                "bedrooms_min": MIN_BEDROOMS,
-                "bathrooms_min": MIN_BATHROOMS,
-                "floor_area_min": int(MIN_SIZE_SQFT / SQM_TO_SQFT),
-                "floor_area_type": "sqm",
-                "page_num": page,
-                "districts[]": DISTRICT_INTS,
-            }
-            logger.info(f"[99co] HTML page {page} via Playwright...")
-            html = fetch_html(_NCO_SEARCH_PAGE, params=params)
-            if html is None:
-                logger.error("[99co] HTML scrape failed — no response")
-                break
+        captured: list[dict] = []
+        total = 0
 
-            soup = BeautifulSoup(html, "lxml")
-            script_tag = soup.find("script", id="__NEXT_DATA__")
-            if not script_tag:
-                logger.error("[99co] __NEXT_DATA__ not found in HTML page")
-                break
+        _PW_UA = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/126.0.0.0 Safari/537.36"
+        )
 
+        search_url = (
+            f"{_NCO_SEARCH_PAGE}"
+            f"?listing_type=sale"
+            f"&main_category=residential"
+            f"&sub_categories[]=condo"
+            f"&sub_categories[]=apartment"
+            f"&price_max={MAX_PRICE}"
+            f"&bedrooms_min={MIN_BEDROOMS}"
+            f"&bathrooms_min={MIN_BATHROOMS}"
+            f"&floor_area_min={int(MIN_SIZE_SQFT / SQM_TO_SQFT)}"
+            f"&floor_area_type=sqm"
+            f"&sort_by=posted_at&order=desc"
+            + "".join(f"&districts[]={d}" for d in DISTRICT_INTS)
+        )
+
+        def _handle_response(response):
+            nonlocal total
+            url = response.url
+            if not ("99.co" in url or "99group" in url):
+                return
+            if response.status != 200:
+                return
+            ct = response.headers.get("content-type", "")
+            if "json" not in ct:
+                return
+            if not any(k in url for k in ("listing", "search", "property")):
+                return
             try:
-                data = json.loads(script_tag.string)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.error(f"[99co] JSON parse error: {e}")
-                break
-
-            # Navigate to listings in __NEXT_DATA__ structure
-            try:
-                page_props = data["props"]["pageProps"]
-                # 99.co structure varies; try common paths
-                raw_listings = (
-                    page_props.get("listings")
-                    or page_props.get("searchData", {}).get("listings", [])
-                    or page_props.get("data", {}).get("listings", [])
+                body = response.json()
+                listings_found = (
+                    (body.get("data") or {}).get("listings")
+                    or body.get("listings")
+                    or (body.get("result") or {}).get("listings")
                     or []
                 )
-                total = (
-                    page_props.get("total")
-                    or page_props.get("searchData", {}).get("total", 0)
-                    or page_props.get("data", {}).get("total", 0)
-                    or 0
+                if listings_found:
+                    captured.extend(listings_found)
+                    t = (
+                        (body.get("data") or {}).get("total")
+                        or body.get("total")
+                        or 0
+                    )
+                    if t:
+                        total = t
+                    logger.info(
+                        f"[99co] Intercepted {len(listings_found)} listings "
+                        f"from {url[:100]}"
+                    )
+            except Exception:
+                pass
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage",
+                          "--disable-blink-features=AutomationControlled"],
                 )
-            except (KeyError, TypeError) as e:
-                logger.error(f"[99co] Unexpected __NEXT_DATA__ structure: {e}")
-                break
+                ctx = browser.new_context(
+                    user_agent=_PW_UA,
+                    viewport={"width": 1920, "height": 1080},
+                    locale="en-US",
+                )
+                ctx.on("response", _handle_response)
+                pg = ctx.new_page()
+                pg.add_init_script(
+                    "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+                )
+                logger.info(f"[99co] Loading search page via Playwright intercept...")
+                pg.goto(search_url, wait_until="load", timeout=90_000)
+                pg.wait_for_timeout(8000)
+                browser.close()
+        except Exception as e:
+            logger.error(f"[99co] Playwright intercept failed: {e}")
+            return []
 
-            if not raw_listings:
-                logger.info(f"[99co] HTML page {page}: no listings — stopping")
-                break
-
-            for raw in raw_listings:
-                try:
-                    listings.append(self._parse_html_listing(raw))
-                except Exception as e:
-                    logger.warning(f"[99co] Parse error: {e}")
-
-            logger.info(f"[99co] HTML page {page}: {len(raw_listings)} listings (total={total})")
-
-            if page * PAGE_SIZE >= total:
-                break
-            page += 1
-            time.sleep(random.uniform(8, 15))
-
+        logger.info(f"[99co] Intercepted total {len(captured)} listings (reported total={total})")
+        listings: list[Listing] = []
+        for raw in captured:
+            try:
+                listings.append(self._parse_api(raw))
+            except Exception as e:
+                logger.warning(f"[99co] Parse error: {e}")
         return listings
 
     def scrape(self) -> list[Listing]:
         result = self._scrape_via_api()
         if result is None:
-            result = self._scrape_via_html()
+            result = self._scrape_via_intercept()
         return result
 
     def _parse_api(self, raw: dict) -> Listing:
