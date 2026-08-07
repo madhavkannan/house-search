@@ -33,4 +33,4 @@ def mrt_within_walk(lat: float, lng: float) -> list[str]:
                 nearby.append(f"{s['name']} ({int(d_m)}m)")
         except (KeyError, TypeError):
             continue
-    return sorted(nearby, key=lambda x: int(x.split("(")[1].rstrip("m)")))
+    return sorted(nearby, key=lambda x: int(x.rsplit("(", 1)[1].rstrip("m)")))
