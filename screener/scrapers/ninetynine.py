@@ -23,7 +23,7 @@ DISTRICT_INTS = [int(d.lstrip("D")) for d in DISTRICTS]
 # Try API versions in order until one works
 _API_VERSIONS = ["v10", "v11", "v12", "v2"]
 _NCO_BASE = "https://www.99.co"
-_NCO_SEARCH_PAGE = f"{_NCO_BASE}/singapore/condos-apartments-for-sale"
+_NCO_SEARCH_PAGE = f"{_NCO_BASE}/singapore/property-for-sale"
 
 
 def _normalize_district(raw: int | str | None) -> str:
