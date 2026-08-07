@@ -1,22 +1,31 @@
+import json
 import logging
 import re
 import time
 import random
 
+import requests
+
 from screener.config import (
     DISTRICTS, MAX_PRICE, MIN_BATHROOMS, MIN_BEDROOMS, MIN_SIZE_SQFT,
-    NCO_SEARCH_URL,
 )
 from screener.models import Listing
 from screener.scrapers.base import BaseScraper
+from screener.scrapers.browser import fetch_html
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 SQM_TO_SQFT = 10.7639
 PAGE_SIZE = 25
 
-# District string "D09" → integer 9
+# District "D09" → integer 9
 DISTRICT_INTS = [int(d.lstrip("D")) for d in DISTRICTS]
+
+# Try API versions in order until one works
+_API_VERSIONS = ["v10", "v11", "v12", "v2"]
+_NCO_BASE = "https://www.99.co"
+_NCO_SEARCH_PAGE = f"{_NCO_BASE}/singapore/condos-apartments-for-sale"
 
 
 def _normalize_district(raw: int | str | None) -> str:
@@ -40,8 +49,8 @@ def _first_image(raw: dict) -> str | None:
 class NinetyNineScraper(BaseScraper):
     SOURCE_NAME = "99co"
 
-    def _base_params(self) -> dict:
-        return {
+    def _api_params(self, page: int) -> dict:
+        params = {
             "listing_type": "sale",
             "main_category": "residential",
             "sub_categories[]": ["condo", "apartment"],
@@ -53,61 +62,64 @@ class NinetyNineScraper(BaseScraper):
             "sort_by": "posted_at",
             "order": "desc",
             "page_size": PAGE_SIZE,
+            "page_num": page,
         }
+        params["districts[]"] = DISTRICT_INTS
+        return params
 
-    def scrape(self) -> list[Listing]:
+    def _try_api(self, page: int) -> requests.Response | None:
+        """Try each API version until one returns 200."""
+        params = self._api_params(page)
+        for version in _API_VERSIONS:
+            url = f"{_NCO_BASE}/api/{version}/web/listings/search"
+            resp = self._get(
+                url,
+                params=params,
+                headers={
+                    "Accept": "application/json",
+                    "Referer": _NCO_SEARCH_PAGE,
+                    "X-Requested-With": "XMLHttpRequest",
+                },
+                accept="application/json",
+                retries=1,
+            )
+            if resp is not None:
+                try:
+                    body = resp.json()
+                    if body.get("status") == "success" or body.get("data"):
+                        logger.info(f"[99co] API {version} responded OK")
+                        return resp
+                except Exception:
+                    pass
+        return None
+
+    def _scrape_via_api(self) -> list[Listing] | None:
+        """Scrape via REST API. Returns None if API is unavailable."""
         listings: list[Listing] = []
         page = 1
 
         while True:
-            params = {**self._base_params(), "page_num": page}
-            # Repeat params for arrays (requests handles list values correctly)
-            for d in DISTRICT_INTS:
-                params.setdefault("districts[]", [])
-                if isinstance(params["districts[]"], list):
-                    params["districts[]"].append(d)
-                else:
-                    params["districts[]"] = [params["districts[]"], d]
-
-            resp = self._get(
-                NCO_SEARCH_URL,
-                params=params,
-                headers={
-                    "Accept": "application/json",
-                    "Referer": "https://www.99.co/singapore/condos-apartments-for-sale",
-                    "X-Requested-With": "XMLHttpRequest",
-                },
-                accept="application/json",
-            )
+            resp = self._try_api(page)
             if resp is None:
-                logger.error("[99.co] Scrape aborted — no response")
-                break
+                logger.warning("[99co] API unavailable on all versions — trying HTML")
+                return None
 
-            try:
-                body = resp.json()
-            except Exception as e:
-                logger.error(f"[99.co] JSON parse error: {e}")
-                break
-
-            if body.get("status") != "success" and not body.get("data"):
-                logger.warning(f"[99.co] Unexpected response status: {body.get('status')}")
-                break
-
+            body = resp.json()
             data = body.get("data", {})
             raw_listings = data.get("listings", [])
             total = data.get("total", 0)
 
             if not raw_listings:
-                logger.info(f"[99.co] No listings on page {page} — stopping")
+                logger.info(f"[99co] API page {page}: no listings — stopping")
                 break
 
             for raw in raw_listings:
                 try:
-                    listings.append(self._parse(raw))
+                    listings.append(self._parse_api(raw))
                 except Exception as e:
-                    logger.warning(f"[99.co] Failed to parse listing: {e}")
+                    logger.warning(f"[99co] Parse error: {e}")
 
-            logger.info(f"[99.co] Page {page}: {len(raw_listings)} listings (total={total})")
+            logger.info(f"[99co] API page {page}: {len(raw_listings)} listings (total={total})")
 
             if page * PAGE_SIZE >= total:
                 break
@@ -116,7 +128,88 @@ class NinetyNineScraper(BaseScraper):
 
         return listings
 
-    def _parse(self, raw: dict) -> Listing:
+    def _scrape_via_html(self) -> list[Listing]:
+        """Fall back: scrape 99.co search HTML using Playwright + __NEXT_DATA__."""
+        listings: list[Listing] = []
+        page = 1
+
+        while True:
+            params = {
+                "listing_type": "sale",
+                "main_category": "residential",
+                "sub_categories[]": ["condo", "apartment"],
+                "price_max": MAX_PRICE,
+                "bedrooms_min": MIN_BEDROOMS,
+                "bathrooms_min": MIN_BATHROOMS,
+                "floor_area_min": int(MIN_SIZE_SQFT / SQM_TO_SQFT),
+                "floor_area_type": "sqm",
+                "page_num": page,
+                "districts[]": DISTRICT_INTS,
+            }
+            logger.info(f"[99co] HTML page {page} via Playwright...")
+            html = fetch_html(_NCO_SEARCH_PAGE, params=params)
+            if html is None:
+                logger.error("[99co] HTML scrape failed — no response")
+                break
+
+            soup = BeautifulSoup(html, "lxml")
+            script_tag = soup.find("script", id="__NEXT_DATA__")
+            if not script_tag:
+                logger.error("[99co] __NEXT_DATA__ not found in HTML page")
+                break
+
+            try:
+                data = json.loads(script_tag.string)
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(f"[99co] JSON parse error: {e}")
+                break
+
+            # Navigate to listings in __NEXT_DATA__ structure
+            try:
+                page_props = data["props"]["pageProps"]
+                # 99.co structure varies; try common paths
+                raw_listings = (
+                    page_props.get("listings")
+                    or page_props.get("searchData", {}).get("listings", [])
+                    or page_props.get("data", {}).get("listings", [])
+                    or []
+                )
+                total = (
+                    page_props.get("total")
+                    or page_props.get("searchData", {}).get("total", 0)
+                    or page_props.get("data", {}).get("total", 0)
+                    or 0
+                )
+            except (KeyError, TypeError) as e:
+                logger.error(f"[99co] Unexpected __NEXT_DATA__ structure: {e}")
+                break
+
+            if not raw_listings:
+                logger.info(f"[99co] HTML page {page}: no listings — stopping")
+                break
+
+            for raw in raw_listings:
+                try:
+                    listings.append(self._parse_html_listing(raw))
+                except Exception as e:
+                    logger.warning(f"[99co] Parse error: {e}")
+
+            logger.info(f"[99co] HTML page {page}: {len(raw_listings)} listings (total={total})")
+
+            if page * PAGE_SIZE >= total:
+                break
+            page += 1
+            time.sleep(random.uniform(8, 15))
+
+        return listings
+
+    def scrape(self) -> list[Listing]:
+        result = self._scrape_via_api()
+        if result is None:
+            result = self._scrape_via_html()
+        return result
+
+    def _parse_api(self, raw: dict) -> Listing:
         attrs = raw.get("attributes") or raw.get("attr") or {}
         cluster = raw.get("cluster") or {}
 
@@ -133,7 +226,7 @@ class NinetyNineScraper(BaseScraper):
 
         url_path = raw.get("url_path") or raw.get("url") or ""
         if url_path and not url_path.startswith("http"):
-            url_path = f"https://www.99.co{url_path}"
+            url_path = f"{_NCO_BASE}{url_path}"
 
         price_raw = raw.get("price") or raw.get("asking_price") or 0
         try:
@@ -167,6 +260,49 @@ class NinetyNineScraper(BaseScraper):
             bathrooms=attrs.get("bathrooms") or raw.get("bathrooms"),
             size_sqft=size_sqft,
             tenure=attrs.get("tenure") or raw.get("tenure"),
+            image_url=_first_image(raw),
+            description=raw.get("description"),
+            listed_at=raw.get("posted_at") or raw.get("listing_date"),
+        )
+
+    def _parse_html_listing(self, raw: dict) -> Listing:
+        """Parse a listing from 99.co __NEXT_DATA__ HTML structure."""
+        # 99.co HTML listings may use different keys than the API
+        size_sqm = raw.get("floor_area") or raw.get("size_sqm") or raw.get("area")
+        size_sqft: float | None = None
+        if size_sqm:
+            try:
+                v = float(size_sqm)
+                size_sqft = round(v * SQM_TO_SQFT, 1) if v < 500 else v
+            except (ValueError, TypeError):
+                pass
+
+        url_path = raw.get("url") or raw.get("url_path") or raw.get("listing_url") or ""
+        if url_path and not url_path.startswith("http"):
+            url_path = f"{_NCO_BASE}{url_path}"
+
+        price_raw = raw.get("price") or raw.get("asking_price") or 0
+        try:
+            price = int(re.sub(r"[^\d]", "", str(price_raw))) if price_raw else 0
+        except ValueError:
+            price = 0
+
+        district_raw = raw.get("district") or raw.get("district_code")
+        district = _normalize_district(district_raw)
+
+        return Listing(
+            source="99co",
+            source_id=str(raw.get("id") or raw.get("listing_id") or ""),
+            url=url_path,
+            project_name=raw.get("name") or raw.get("project_name") or "",
+            address=raw.get("address") or raw.get("location") or "",
+            postal_code=str(raw["postal_code"]) if raw.get("postal_code") else None,
+            district=district,
+            price=price,
+            bedrooms=raw.get("bedrooms") or raw.get("bedroom"),
+            bathrooms=raw.get("bathrooms") or raw.get("bathroom"),
+            size_sqft=size_sqft,
+            tenure=raw.get("tenure"),
             image_url=_first_image(raw),
             description=raw.get("description"),
             listed_at=raw.get("posted_at") or raw.get("listing_date"),
