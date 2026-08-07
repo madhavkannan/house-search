@@ -66,18 +66,6 @@ def _build_params(page: int) -> dict:
     }
 
 
-def _find_arrays(obj: object, path: str, results: list, depth: int = 0) -> None:
-    """Recursively find all list-of-dicts with 5+ items anywhere in the JSON tree."""
-    if depth > 8:
-        return
-    if isinstance(obj, list) and len(obj) >= 5 and obj and isinstance(obj[0], dict):
-        results.append((path, len(obj), list(obj[0].keys())[:10]))
-        return  # don't recurse into list items
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            _find_arrays(v, f"{path}.{k}", results, depth + 1)
-
-
 def _parse_html(html: str) -> tuple[list[dict], int]:
     """Extract raw listing dicts and total count from page HTML."""
     soup = BeautifulSoup(html, "lxml")
@@ -88,30 +76,37 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
     try:
         data = json.loads(script_tag.string)
         page_props = data["props"]["pageProps"]
-
         page_data = page_props.get("pageData", {})
-        raw_listings = (
-            page_props.get("listings")
-            or page_props.get("searchListingData", {}).get("listings", [])
-            or (page_data.get("data") if isinstance(page_data.get("data"), list) else [])
-            or []
-        )
+        data_section = page_data.get("data", {}) if isinstance(page_data.get("data"), dict) else {}
+
+        # Primary path: pageData.data.listingsData[*].listingData
+        listings_wrappers = data_section.get("listingsData", [])
+        raw_listings = [
+            item["listingData"]
+            for item in listings_wrappers
+            if isinstance(item.get("listingData"), dict)
+        ]
+
+        # Fallback paths for resilience
+        if not raw_listings:
+            raw_listings = (
+                page_props.get("listings")
+                or page_props.get("searchListingData", {}).get("listings", [])
+                or []
+            )
+
         total = (
             page_props.get("total")
             or page_props.get("searchListingData", {}).get("total", 0)
             or page_data.get("resultCount", 0)
-            or 0
+            or len(raw_listings)
         )
-        if not raw_listings:
-            # Recursive scan: find every large array anywhere in __NEXT_DATA__
-            results: list[tuple[str, int, list]] = []
-            _find_arrays(data, "root", results)
-            logger.warning(f"[PropertyGuru] Recursive scan found {len(results)} arrays. Top by size:")
-            for path, length, keys in sorted(results, key=lambda x: -x[1])[:20]:
-                logger.warning(f"[PropertyGuru]   {path}: len={length}, keys={keys}")
-            # Log rblsRequestParams — may reveal the client-side API endpoint
-            rbls = page_data.get("rblsRequestParams")
-            logger.warning(f"[PropertyGuru] rblsRequestParams: {str(rbls)[:600]}")
+
+        if raw_listings:
+            logger.info(f"[PropertyGuru] listingData[0] keys: {list(raw_listings[0].keys())[:20]}")
+        else:
+            logger.warning("[PropertyGuru] No listings found in any known path")
+
         return raw_listings, total
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.error(f"[PropertyGuru] JSON parse error: {e}")
