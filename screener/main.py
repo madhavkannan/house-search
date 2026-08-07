@@ -31,6 +31,8 @@ def _enrich(listing: Listing, pg_scraper: PropertyGuruScraper) -> Listing:
 
     # 3. Geocode + nearby schools/MRT
     coords = geocode(listing.address, listing.postal_code)
+    if coords is None and listing.project_name:
+        coords = geocode(listing.project_name, listing.postal_code)
     if coords:
         listing.lat, listing.lng = coords
         listing.geocode_ok = True

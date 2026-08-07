@@ -56,8 +56,12 @@ def _first_image(raw: dict) -> str | None:
     # New structure: mediaItems list of dicts
     for item in (raw.get("mediaItems") or []):
         if isinstance(item, dict):
-            url = item.get("url") or item.get("src") or item.get("thumbnailUrl")
-            if url:
+            url = (
+                item.get("url") or item.get("src") or item.get("origin")
+                or item.get("cdnUrl") or item.get("thumbnailUrl")
+                or item.get("thumbnail") or item.get("image")
+            )
+            if url and isinstance(url, str):
                 return url
         elif isinstance(item, str) and item:
             return item
@@ -126,8 +130,16 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
         )
 
         if raw_listings:
-            logger.info(f"[PropertyGuru] listingData[0] keys: {list(raw_listings[0].keys())[:20]}")
-            logger.info(f"[PropertyGuru] listingData[0] sample: {str(raw_listings[0])[:500]}")
+            r0 = raw_listings[0]
+            logger.info(f"[PG-DIAG] keys: {list(r0.keys())}")
+            logger.info(f"[PG-DIAG] fullAddress: {r0.get('fullAddress')}")
+            logger.info(f"[PG-DIAG] price: {r0.get('price')}")
+            logger.info(f"[PG-DIAG] psfText: {r0.get('psfText')}")
+            logger.info(f"[PG-DIAG] property: {str(r0.get('property'))[:600]}")
+            logger.info(f"[PG-DIAG] listingFeatures: {str(r0.get('listingFeatures'))[:600]}")
+            mi = r0.get("mediaItems") or []
+            logger.info(f"[PG-DIAG] mediaItems[0]: {str(mi[0] if mi else None)}")
+            logger.info(f"[PG-DIAG] mrt: {str(r0.get('mrt'))[:300]}")
         else:
             logger.warning("[PropertyGuru] No listings found in any known path")
 
@@ -199,11 +211,6 @@ def _parse_listing(raw: dict) -> Listing:
 
     # --- property sub-dict: district, postal, tenure, description, size ---
     prop = raw.get("property") or {}
-    if prop and not hasattr(_parse_listing, "_prop_logged"):
-        logger.info(f"[PropertyGuru] property keys: {list(prop.keys())[:20]}")
-        logger.info(f"[PropertyGuru] property sample: {str(prop)[:400]}")
-        _parse_listing._prop_logged = True  # type: ignore[attr-defined]
-
     full_address = raw.get("fullAddress") or raw.get("shortAddress") or ""
 
     district = (
@@ -216,20 +223,24 @@ def _parse_listing(raw: dict) -> Listing:
 
     postal = (
         prop.get("postalCode") or prop.get("postal_code") or prop.get("postCode")
-        or raw.get("postalCode") or raw.get("postal_code")
+        or prop.get("zipCode") or raw.get("postalCode") or raw.get("postal_code")
         or _extract_postal(full_address)
     )
 
-    tenure_raw = prop.get("tenure") or prop.get("tenureText") or raw.get("tenure")
+    tenure_raw = (
+        prop.get("tenure") or prop.get("tenureText") or prop.get("tenureCode")
+        or prop.get("tenureDetails") or raw.get("tenure") or raw.get("tenureText")
+    )
 
     description = str(prop.get("description") or raw.get("description") or "") or None
 
-    # Size: prefer features parse, fall back to property dict
+    # Size: features parse → property dict → psfText+price derivation
     size_sqft: float | None = size_from_features
     if size_sqft is None:
         size_raw = (
             prop.get("floorAreaMin") or prop.get("floor_area_min")
-            or prop.get("floorArea") or prop.get("size")
+            or prop.get("floorArea") or prop.get("size") or prop.get("area")
+            or prop.get("landArea") or prop.get("builtArea")
         )
         if size_raw:
             try:
@@ -237,6 +248,17 @@ def _parse_listing(raw: dict) -> Listing:
                 if v > 0:
                     size_sqft = round(v * 10.7639, 1) if v < 200 else v
             except (ValueError, TypeError):
+                pass
+    # Last resort: derive from psfText (price per sqft) + total price
+    if size_sqft is None and price_val:
+        psf_text = raw.get("psfText") or ""
+        m = re.search(r"[\d,]+\.?\d*", psf_text.replace(",", ""))
+        if m:
+            try:
+                psf = float(m.group())
+                if psf > 0:
+                    size_sqft = round(price_val / psf, 1)
+            except (ValueError, ZeroDivisionError):
                 pass
 
     # --- Address & project name ---
