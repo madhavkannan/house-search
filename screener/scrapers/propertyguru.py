@@ -104,6 +104,7 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
 
         if raw_listings:
             logger.info(f"[PropertyGuru] listingData[0] keys: {list(raw_listings[0].keys())[:20]}")
+            logger.info(f"[PropertyGuru] listingData[0] sample: {str(raw_listings[0])[:500]}")
         else:
             logger.warning("[PropertyGuru] No listings found in any known path")
 
@@ -113,18 +114,35 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
         return [], 0
 
 
+def _scalar(v: object, *fallback_keys_in_dict: str) -> object:
+    """If v is a dict, extract a scalar from it using common keys."""
+    if not isinstance(v, dict):
+        return v
+    for k in fallback_keys_in_dict or ("value", "amount", "min", "text"):
+        if v.get(k) is not None:
+            return v[k]
+    return None
+
+
 def _parse_listing(raw: dict) -> Listing:
     district = _normalize_district(
-        raw.get("district") or raw.get("district_code")
+        _scalar(raw.get("district") or raw.get("district_code"))
     )
-    price_val = raw.get("price") or raw.get("asking_price_formatted", "0")
-    if isinstance(price_val, str):
-        price_val = re.sub(r"[^\d]", "", price_val)
-        price_val = int(price_val) if price_val else 0
-    else:
-        price_val = int(price_val or 0)
 
-    size_raw = raw.get("floor_area_min") or raw.get("floor_area") or raw.get("size")
+    price_raw = _scalar(
+        raw.get("price") or raw.get("asking_price_formatted") or raw.get("formattedPrice"),
+        "value", "amount", "min",
+    ) or 0
+    if isinstance(price_raw, str):
+        price_raw = re.sub(r"[^\d]", "", price_raw)
+        price_val = int(price_raw) if price_raw else 0
+    else:
+        price_val = int(price_raw or 0)
+
+    size_raw = _scalar(
+        raw.get("floor_area_min") or raw.get("floor_area") or raw.get("size") or raw.get("floorArea"),
+        "value", "min",
+    )
     size_sqft: float | None = None
     if size_raw:
         try:
@@ -133,30 +151,39 @@ def _parse_listing(raw: dict) -> Listing:
         except ValueError:
             pass
 
-    listing_id = str(raw.get("id") or raw.get("listing_id") or "")
-    url_path = raw.get("url") or raw.get("listing_url") or ""
+    listing_id = str(raw.get("id") or raw.get("listing_id") or raw.get("listingId") or "")
+    url_path = str(_scalar(raw.get("url") or raw.get("listing_url") or raw.get("listingUrl") or "") or "")
     if url_path and not url_path.startswith("http"):
         url_path = f"https://www.propertyguru.com.sg{url_path}"
 
-    address = raw.get("address") or raw.get("street_name") or raw.get("location") or ""
-    postal = raw.get("postal_code") or _extract_postal(address)
+    address = str(
+        _scalar(raw.get("address") or raw.get("street_name") or raw.get("streetName") or raw.get("location") or "") or ""
+    )
+    postal = raw.get("postal_code") or raw.get("postalCode") or _extract_postal(address)
+
+    bedrooms = _scalar(raw.get("bedroom") or raw.get("bedrooms") or raw.get("bedroomCount"))
+    bathrooms = _scalar(raw.get("bathroom") or raw.get("bathrooms") or raw.get("bathroomCount"))
+    tenure_raw = _scalar(raw.get("tenure"))
 
     return Listing(
         source="propertyguru",
         source_id=listing_id,
         url=url_path,
-        project_name=raw.get("name") or raw.get("project_name") or raw.get("listing_name") or "",
+        project_name=str(_scalar(
+            raw.get("name") or raw.get("project_name") or raw.get("projectName") or
+            raw.get("listing_name") or raw.get("listingName") or ""
+        ) or ""),
         address=address,
-        postal_code=postal,
+        postal_code=str(postal) if postal else None,
         district=district,
         price=price_val,
-        bedrooms=raw.get("bedroom") or raw.get("bedrooms"),
-        bathrooms=raw.get("bathroom") or raw.get("bathrooms"),
+        bedrooms=int(bedrooms) if bedrooms is not None else None,
+        bathrooms=int(bathrooms) if bathrooms is not None else None,
         size_sqft=size_sqft,
-        tenure=raw.get("tenure"),
+        tenure=str(tenure_raw) if tenure_raw else None,
         image_url=_first_image(raw),
-        description=raw.get("description"),
-        listed_at=raw.get("listing_date") or raw.get("date_formatted"),
+        description=str(_scalar(raw.get("description") or "") or "") or None,
+        listed_at=raw.get("listing_date") or raw.get("date_formatted") or raw.get("listedAt"),
     )
 
 
