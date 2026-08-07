@@ -66,6 +66,18 @@ def _build_params(page: int) -> dict:
     }
 
 
+def _find_arrays(obj: object, path: str, results: list, depth: int = 0) -> None:
+    """Recursively find all list-of-dicts with 5+ items anywhere in the JSON tree."""
+    if depth > 8:
+        return
+    if isinstance(obj, list) and len(obj) >= 5 and obj and isinstance(obj[0], dict):
+        results.append((path, len(obj), list(obj[0].keys())[:10]))
+        return  # don't recurse into list items
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            _find_arrays(v, f"{path}.{k}", results, depth + 1)
+
+
 def _parse_html(html: str) -> tuple[list[dict], int]:
     """Extract raw listing dicts and total count from page HTML."""
     soup = BeautifulSoup(html, "lxml")
@@ -91,20 +103,15 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
             or 0
         )
         if not raw_listings:
-            logger.warning(f"[PropertyGuru] No listings found. pageData keys: {list(page_data.keys())[:15]}")
-            # Probe likely candidates for listing data
-            for candidate in ["pgBasePageLayoutData", "searchParams", "layoutConfig", "ippBasePageLayoutData"]:
-                v = page_data.get(candidate)
-                if v is None:
-                    continue
-                if isinstance(v, list):
-                    logger.warning(f"[PropertyGuru] pageData.{candidate}: list len={len(v)}, first={str(v[0])[:150] if v else 'empty'}")
-                elif isinstance(v, dict):
-                    logger.warning(f"[PropertyGuru] pageData.{candidate} keys: {list(v.keys())[:15]}")
-                    # Look for any list values inside
-                    for k2, v2 in v.items():
-                        if isinstance(v2, list) and v2:
-                            logger.warning(f"[PropertyGuru]   pageData.{candidate}.{k2}: list len={len(v2)}, first type={type(v2[0]).__name__}")
+            # Recursive scan: find every large array anywhere in __NEXT_DATA__
+            results: list[tuple[str, int, list]] = []
+            _find_arrays(data, "root", results)
+            logger.warning(f"[PropertyGuru] Recursive scan found {len(results)} arrays. Top by size:")
+            for path, length, keys in sorted(results, key=lambda x: -x[1])[:20]:
+                logger.warning(f"[PropertyGuru]   {path}: len={length}, keys={keys}")
+            # Log rblsRequestParams — may reveal the client-side API endpoint
+            rbls = page_data.get("rblsRequestParams")
+            logger.warning(f"[PropertyGuru] rblsRequestParams: {str(rbls)[:600]}")
         return raw_listings, total
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.error(f"[PropertyGuru] JSON parse error: {e}")
