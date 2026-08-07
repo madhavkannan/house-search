@@ -135,15 +135,13 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
             r0 = raw_listings[0]
             logger.info(f"[PG-DIAG] keys: {list(r0.keys())}")
             logger.info(f"[PG-DIAG] fullAddress: {r0.get('fullAddress')}")
-            logger.info(f"[PG-DIAG] price: {r0.get('price')}")
-            logger.info(f"[PG-DIAG] psfText: {r0.get('psfText')}")
-            logger.info(f"[PG-DIAG] property: {str(r0.get('property'))[:600]}")
-            logger.info(f"[PG-DIAG] listingFeatures: {str(r0.get('listingFeatures'))[:600]}")
-            mi = r0.get("mediaItems") or []
-            logger.info(f"[PG-DIAG] mediaItems[0]: {str(mi[0] if mi else None)}")
-            logger.info(f"[PG-DIAG] mrt: {str(r0.get('mrt'))[:300]}")
+            logger.info(f"[PG-DIAG] listingFeatures: {str(r0.get('listingFeatures'))[:300]}")
+            logger.info(f"[PG-DIAG] thumbnail: {str(r0.get('thumbnail'))[:200]}")
         else:
             logger.warning("[PropertyGuru] No listings found in any known path")
+            logger.warning(f"[PG-DIAG] pageProps keys: {list(page_props.keys())}")
+            logger.warning(f"[PG-DIAG] pageData keys: {list(page_data.keys()) if isinstance(page_data, dict) else page_data}")
+            logger.warning(f"[PG-DIAG] data_section keys: {list(data_section.keys()) if isinstance(data_section, dict) else data_section}")
 
         return raw_listings, total
     except (json.JSONDecodeError, KeyError, TypeError) as e:
@@ -294,8 +292,9 @@ class PropertyGuruScraper:
         page = 1
 
         while True:
-            logger.info(f"[PropertyGuru] Fetching page {page}...")
-            html = fetch_html(PG_SEARCH_URL, params=_build_params(page))
+            params = _build_params(page)
+            logger.info(f"[PropertyGuru] Fetching page {page} districts={params.get('district_code[]')}...")
+            html = fetch_html(PG_SEARCH_URL, params=params)
             if html is None:
                 logger.error("[PropertyGuru] Scrape aborted — no response")
                 break
