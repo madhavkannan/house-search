@@ -51,23 +51,19 @@ def _first_image(raw: dict) -> str | None:
 
 
 def _build_params(page: int) -> dict:
-    params: dict = {
+    # Omit array-style params (property_type_code[], district_code[]) — ScrapingBee rejects
+    # URLs containing [] in parameter names. District/type filtering happens in passes_hard_criteria.
+    return {
         "listing_type": "sale",
         "search": "true",
         "maxprice": MAX_PRICE,
         "minbeds": MIN_BEDROOMS,
         "minbaths": MIN_BATHROOMS,
         "minsize": int(MIN_SIZE_SQFT),
-        "freetext": "",
         "sort": "date",
         "order": "desc",
         "page": page,
     }
-    for pt in PG_PROPERTY_TYPES:
-        params.setdefault("property_type_code[]", []).append(pt)
-    for dc in _district_codes():
-        params.setdefault("district_code[]", []).append(dc)
-    return params
 
 
 def _parse_html(html: str) -> tuple[list[dict], int]:
