@@ -91,10 +91,20 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
             or 0
         )
         if not raw_listings:
-            # Log structure to debug if path changes again
-            logger.warning(f"[PropertyGuru] No listings found. pageData keys: {list(page_data.keys())[:10]}")
-            data_val = page_data.get("data")
-            logger.warning(f"[PropertyGuru] pageData.data type={type(data_val).__name__}, preview={str(data_val)[:200]}")
+            logger.warning(f"[PropertyGuru] No listings found. pageData keys: {list(page_data.keys())[:15]}")
+            # Probe likely candidates for listing data
+            for candidate in ["pgBasePageLayoutData", "searchParams", "layoutConfig", "ippBasePageLayoutData"]:
+                v = page_data.get(candidate)
+                if v is None:
+                    continue
+                if isinstance(v, list):
+                    logger.warning(f"[PropertyGuru] pageData.{candidate}: list len={len(v)}, first={str(v[0])[:150] if v else 'empty'}")
+                elif isinstance(v, dict):
+                    logger.warning(f"[PropertyGuru] pageData.{candidate} keys: {list(v.keys())[:15]}")
+                    # Look for any list values inside
+                    for k2, v2 in v.items():
+                        if isinstance(v2, list) and v2:
+                            logger.warning(f"[PropertyGuru]   pageData.{candidate}.{k2}: list len={len(v2)}, first type={type(v2[0]).__name__}")
         return raw_listings, total
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.error(f"[PropertyGuru] JSON parse error: {e}")
