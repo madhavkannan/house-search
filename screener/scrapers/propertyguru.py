@@ -220,6 +220,8 @@ def _parse_listing(raw: dict) -> Listing:
         )
         or _extract_district_from_address(full_address)
     )
+    if not district:
+        logger.debug(f"[PG] blank district, fullAddress={full_address!r}")
 
     postal = (
         prop.get("postalCode") or prop.get("postal_code") or prop.get("postCode")
@@ -309,6 +311,16 @@ class PropertyGuruScraper:
 
             for raw in raw_listings:
                 try:
+                    prop = raw.get("property") or {}
+                    sub_type = prop.get("subTypeText") or prop.get("typeText") or ""
+                    type_group = prop.get("typeGroup") or ""
+                    # Skip HDB and landed residential
+                    if type_group == "H" or sub_type in (
+                        "HDB Flat", "Terrace House", "Semi-Detached House",
+                        "Bungalow", "Good Class Bungalow", "Cluster House",
+                        "Corner Terrace", "Land Only", "Walk-up Apartment",
+                    ):
+                        continue
                     listings.append(_parse_listing(raw))
                 except Exception as e:
                     logger.warning(f"[PropertyGuru] Failed to parse listing: {e}")
