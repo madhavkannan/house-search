@@ -23,7 +23,126 @@ DISTRICT_INTS = [int(d.lstrip("D")) for d in DISTRICTS]
 # Try API versions in order until one works
 _API_VERSIONS = ["v10", "v11", "v12", "v2"]
 _NCO_BASE = "https://www.99.co"
-_NCO_SEARCH_PAGE = f"{_NCO_BASE}/singapore"
+# /singapore redirects (301) to / on the new Next.js App Router site
+_NCO_SEARCH_PAGE = _NCO_BASE
+
+# Candidate listing-search API paths to probe (all under /api/{version}/)
+_LISTING_PATHS = [
+    "web/listings/search",
+    "listings/search",
+    "web/search/listings",
+    "search/listings",
+    "web/listings",
+    "listings",
+    "web/properties/search",
+]
+
+# Candidate search page URLs — tried in order until one loads listing data
+_SEARCH_PAGE_URLS = [
+    f"{_NCO_BASE}/singapore/for-sale",
+    f"{_NCO_BASE}/singapore/property-for-sale",
+    f"{_NCO_BASE}/singapore/condos-apartments-for-sale",
+    f"{_NCO_BASE}/singapore/sale",
+    f"{_NCO_BASE}/buy",
+    f"{_NCO_BASE}/singapore",
+    _NCO_BASE,
+]
+
+
+def _html_has_listings(html: str) -> bool:
+    """Quick check: does the HTML look like it contains listing data?"""
+    # Property prices in SGD are 6+ digit numbers near "price" or "$"
+    return bool(re.search(r'"price"\s*:\s*[1-9]\d{5,}', html))
+
+
+def _extract_listings_from_html(html: str) -> list[dict]:
+    """
+    Extract listing dicts from Next.js-embedded page data.
+    Tries __NEXT_DATA__ (Pages Router) first, then RSC payload scripts
+    (App Router), then a generic large-JSON scan.
+    """
+    results: list[dict] = []
+
+    # 1. __NEXT_DATA__ (Next.js Pages Router)
+    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            props = data.get("props", {}).get("pageProps", {})
+            raw_listings = (
+                props.get("listings")
+                or (props.get("data") or {}).get("listings")
+                or (props.get("searchResults") or {}).get("listings")
+                or (props.get("result") or {}).get("listings")
+                or []
+            )
+            if raw_listings:
+                logger.info(f"[99co] __NEXT_DATA__ yielded {len(raw_listings)} listings")
+                return raw_listings
+            # Log available keys for diagnostics
+            logger.info(f"[99co] __NEXT_DATA__ pageProps keys: {list(props.keys())[:15]}")
+        except Exception as e:
+            logger.info(f"[99co] __NEXT_DATA__ parse failed: {e}")
+
+    # 2. Next.js App Router RSC payload: self.__next_f.push([1,"..."])
+    # The payload encodes RSC chunks; look for embedded JSON objects with listing fields
+    rsc_chunks: list[str] = []
+    for m in re.finditer(r'self\.__next_f\.push\(\[.*?,"(.*?)"\]\)', html, re.S):
+        rsc_chunks.append(m.group(1))
+
+    if rsc_chunks:
+        logger.info(f"[99co] Found {len(rsc_chunks)} RSC payload chunks")
+        combined = "\n".join(rsc_chunks)
+        # Un-escape JSON string escapes
+        try:
+            combined = combined.encode().decode("unicode_escape")
+        except Exception:
+            pass
+        # Look for JSON arrays that contain listing-like objects
+        results = _scan_for_listing_arrays(combined)
+        if results:
+            return results
+
+    # 3. Generic scan: find JSON arrays with listing-shaped objects in all <script> tags
+    for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.S):
+        chunk = m.group(1)
+        if '"price"' not in chunk and '"bedrooms"' not in chunk:
+            continue
+        found = _scan_for_listing_arrays(chunk)
+        if found:
+            results.extend(found)
+
+    return results
+
+
+def _scan_for_listing_arrays(text: str) -> list[dict]:
+    """Find JSON arrays whose items look like property listings."""
+    results: list[dict] = []
+    # Find positions of potential JSON arrays containing listing fields
+    for m in re.finditer(r'\[(\s*\{[^{}]{0,50}"(?:price|bedrooms|listing_id|source_id)")', text):
+        start = m.start()
+        depth = 0
+        for i, c in enumerate(text[start:], start):
+            if c == '[':
+                depth += 1
+            elif c == ']':
+                depth -= 1
+                if depth == 0:
+                    snippet = text[start:i + 1]
+                    try:
+                        arr = json.loads(snippet)
+                        if isinstance(arr, list) and arr and isinstance(arr[0], dict):
+                            # Validate it's actually a listing array
+                            if any(
+                                k in arr[0]
+                                for k in ("price", "bedrooms", "listing_id", "id", "url_path")
+                            ):
+                                logger.info(f"[99co] Found listing array: {len(arr)} items, keys={list(arr[0].keys())[:8]}")
+                                results.extend(arr)
+                    except Exception:
+                        pass
+                    break
+    return results
 
 
 def _normalize_district(raw: int | str | None) -> str:
@@ -66,29 +185,36 @@ class NinetyNineScraper(BaseScraper):
         return params
 
     def _try_api(self, page: int) -> requests.Response | None:
-        """Try each API version until one returns 200."""
+        """Try each API version × path combination until one returns listings."""
         params = self._api_params(page)
         for version in _API_VERSIONS:
-            url = f"{_NCO_BASE}/api/{version}/web/listings/search"
-            resp = self._get(
-                url,
-                params=params,
-                headers={
-                    "Accept": "application/json",
-                    "Referer": _NCO_SEARCH_PAGE,
-                    "X-Requested-With": "XMLHttpRequest",
-                },
-                accept="application/json",
-                retries=1,
-            )
-            if resp is not None:
-                try:
-                    body = resp.json()
-                    if body.get("status") == "success" or body.get("data"):
-                        logger.info(f"[99co] API {version} responded OK")
-                        return resp
-                except Exception:
-                    pass
+            for path in _LISTING_PATHS:
+                url = f"{_NCO_BASE}/api/{version}/{path}"
+                resp = self._get(
+                    url,
+                    params=params,
+                    headers={
+                        "Accept": "application/json",
+                        "Referer": _NCO_SEARCH_PAGE,
+                        "X-Requested-With": "XMLHttpRequest",
+                    },
+                    accept="application/json",
+                    retries=1,
+                )
+                if resp is not None:
+                    try:
+                        body = resp.json()
+                        # Accept any response that contains listing data
+                        has_listings = (
+                            (body.get("data") or {}).get("listings")
+                            or body.get("listings")
+                            or (body.get("result") or {}).get("listings")
+                        )
+                        if has_listings or body.get("status") == "success":
+                            logger.info(f"[99co] API {version}/{path} responded OK")
+                            return resp
+                    except Exception:
+                        pass
         return None
 
     def _scrape_via_api(self) -> list[Listing] | None:
@@ -128,9 +254,10 @@ class NinetyNineScraper(BaseScraper):
 
     def _scrape_via_intercept(self) -> list[Listing]:
         """
-        Load 99.co in Playwright and intercept the XHR that fetches listings.
-        99.co is client-side rendered — __NEXT_DATA__ has no listings, but the
-        page fires an API call we can capture via response interception.
+        Load 99.co search pages in Playwright, intercept XHR responses AND
+        parse SSR-embedded data (Next.js __NEXT_DATA__ or RSC payload).
+        99.co migrated to Next.js App Router; listing data may be SSR-embedded
+        rather than fetched via separate XHR.
         """
         try:
             from playwright.sync_api import sync_playwright
@@ -142,17 +269,14 @@ class NinetyNineScraper(BaseScraper):
 
         captured: list[dict] = []
         total = 0
-        discovered_api_url: list[str] = []  # mutable container for closure
+        discovered_api_url: list[str] = []
+        html_pages: list[tuple[str, str]] = []  # (final_url, html)
 
         _PW_UA = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/126.0.0.0 Safari/537.36"
         )
-
-        # Load the plain search page — the parameterised URL 404s.
-        # The page fires an XHR whose URL reveals the real listings API endpoint.
-        search_url = _NCO_SEARCH_PAGE
 
         def _handle_response(response):
             nonlocal total
@@ -185,7 +309,6 @@ class NinetyNineScraper(BaseScraper):
                     )
                     if t:
                         total = t
-                    # Record base URL (path only, no query) for pagination
                     if not discovered_api_url:
                         parsed = urlparse(url)
                         discovered_api_url.append(
@@ -215,20 +338,49 @@ class NinetyNineScraper(BaseScraper):
                 pg.add_init_script(
                     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
                 )
-                logger.info("[99co] Loading search page via Playwright intercept...")
-                pg.goto(search_url, wait_until="load", timeout=90_000)
-                pg.wait_for_timeout(8000)
+
+                for search_url in _SEARCH_PAGE_URLS:
+                    logger.info(f"[99co] Trying page: {search_url}")
+                    try:
+                        resp = pg.goto(search_url, wait_until="load", timeout=60_000)
+                        final_url = pg.url
+                        logger.info(f"[99co] Landed at: {final_url} (status={resp.status if resp else '?'})")
+                        # Give dynamic content time to load
+                        pg.wait_for_timeout(10_000)
+                        html = pg.content()
+                        html_pages.append((final_url, html))
+                        if captured:
+                            logger.info(f"[99co] XHR interception yielded {len(captured)} — stopping page loop")
+                            break
+                        # Check if HTML has listing data before trying next URL
+                        if _html_has_listings(html):
+                            logger.info(f"[99co] HTML contains listing data at {final_url}")
+                            break
+                    except Exception as e:
+                        logger.warning(f"[99co] Failed to load {search_url}: {e}")
+                        continue
+
                 browser.close()
         except Exception as e:
             logger.error(f"[99co] Playwright intercept failed: {e}")
             return []
 
         logger.info(
-            f"[99co] Intercepted {len(captured)} listings from page 1 "
-            f"(reported total={total}); api_url={discovered_api_url[0] if discovered_api_url else 'none'}"
+            f"[99co] After page loads: {len(captured)} via XHR, "
+            f"{len(html_pages)} HTML pages captured; "
+            f"api_url={discovered_api_url[0] if discovered_api_url else 'none'}"
         )
 
-        # If we found the real API URL, paginate the remaining pages with our filters
+        # Parse SSR-embedded listing data from HTML if XHR interception missed it
+        if not captured and html_pages:
+            for page_url, html in html_pages:
+                extracted = _extract_listings_from_html(html)
+                if extracted:
+                    captured.extend(extracted)
+                    logger.info(f"[99co] HTML extraction: {len(extracted)} listings from {page_url}")
+                    break
+
+        # Paginate via discovered API URL
         if discovered_api_url and total > PAGE_SIZE:
             api_url = discovered_api_url[0]
             logger.info(f"[99co] Paginating via discovered API: {api_url}")
