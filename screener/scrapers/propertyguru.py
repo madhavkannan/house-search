@@ -91,7 +91,6 @@ def _build_params(page: int) -> dict:
         "order": "desc",
         "page": page,
         "district_code[]": district_nums,
-        "property_type_code[]": PG_PROPERTY_TYPES,
     }
 
 
@@ -139,8 +138,12 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
             logger.info(f"[PG-DIAG] thumbnail: {str(r0.get('thumbnail'))[:200]}")
         else:
             logger.warning("[PropertyGuru] No listings found in any known path")
-            logger.warning(f"[PG-DIAG] pageProps keys: {list(page_props.keys())}")
-            logger.warning(f"[PG-DIAG] pageData keys: {list(page_data.keys()) if isinstance(page_data, dict) else page_data}")
+            result_count = page_data.get("resultCount", "?") if isinstance(page_data, dict) else "?"
+            logger.warning(f"[PG-DIAG] resultCount={result_count}")
+            lw = data_section.get("listingsData") if isinstance(data_section, dict) else None
+            logger.warning(f"[PG-DIAG] listingsData type={type(lw).__name__} len={len(lw) if isinstance(lw, list) else 'N/A'}")
+            if isinstance(lw, list) and lw:
+                logger.warning(f"[PG-DIAG] listingsData[0] keys: {list(lw[0].keys()) if isinstance(lw[0], dict) else lw[0]}")
             logger.warning(f"[PG-DIAG] data_section keys: {list(data_section.keys()) if isinstance(data_section, dict) else data_section}")
 
         return raw_listings, total
