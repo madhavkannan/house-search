@@ -77,26 +77,24 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
         data = json.loads(script_tag.string)
         page_props = data["props"]["pageProps"]
 
-        # Log top-level keys + one level deep so we can find where listings live
-        top_keys = list(page_props.keys())
-        logger.info(f"[PropertyGuru] pageProps keys: {top_keys}")
-        for k in top_keys:
-            v = page_props[k]
-            if isinstance(v, dict):
-                logger.info(f"[PropertyGuru]   pageProps.{k} keys: {list(v.keys())}")
-            elif isinstance(v, list):
-                logger.info(f"[PropertyGuru]   pageProps.{k}: list len={len(v)}")
-
+        page_data = page_props.get("pageData", {})
         raw_listings = (
             page_props.get("listings")
             or page_props.get("searchListingData", {}).get("listings", [])
+            or (page_data.get("data") if isinstance(page_data.get("data"), list) else [])
             or []
         )
         total = (
             page_props.get("total")
             or page_props.get("searchListingData", {}).get("total", 0)
+            or page_data.get("resultCount", 0)
             or 0
         )
+        if not raw_listings:
+            # Log structure to debug if path changes again
+            logger.warning(f"[PropertyGuru] No listings found. pageData keys: {list(page_data.keys())[:10]}")
+            data_val = page_data.get("data")
+            logger.warning(f"[PropertyGuru] pageData.data type={type(data_val).__name__}, preview={str(data_val)[:200]}")
         return raw_listings, total
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         logger.error(f"[PropertyGuru] JSON parse error: {e}")
