@@ -40,13 +40,23 @@ def _extract_postal(text: str | None) -> str | None:
 
 
 def _first_image(raw: dict) -> str | None:
-    photos = raw.get("photos") or raw.get("photo") or []
-    if isinstance(photos, list) and photos:
-        p = photos[0]
-        if isinstance(p, dict):
-            return p.get("url") or p.get("src")
-        if isinstance(p, str):
-            return p
+    # New structure: mediaItems list of dicts
+    for item in (raw.get("mediaItems") or []):
+        if isinstance(item, dict):
+            url = item.get("url") or item.get("src") or item.get("thumbnailUrl")
+            if url:
+                return url
+        elif isinstance(item, str) and item:
+            return item
+    # Legacy fallback
+    for key in ("photos", "photo"):
+        for p in (raw.get(key) or []):
+            if isinstance(p, dict):
+                url = p.get("url") or p.get("src")
+                if url:
+                    return url
+            elif isinstance(p, str) and p:
+                return p
     return None
 
 
@@ -125,64 +135,113 @@ def _scalar(v: object, *fallback_keys_in_dict: str) -> object:
 
 
 def _parse_listing(raw: dict) -> Listing:
-    district = _normalize_district(
-        _scalar(raw.get("district") or raw.get("district_code"))
-    )
+    # --- ID & URL ---
+    listing_id = str(raw.get("id") or raw.get("listing_id") or raw.get("listingId") or "")
+    url_path = str(raw.get("url") or raw.get("listing_url") or raw.get("listingUrl") or "")
+    if url_path and not url_path.startswith("http"):
+        url_path = f"https://www.propertyguru.com.sg{url_path}"
+    if not url_path and listing_id:
+        url_path = f"https://www.propertyguru.com.sg/property-for-sale/{listing_id}"
 
-    price_raw = _scalar(
-        raw.get("price") or raw.get("asking_price_formatted") or raw.get("formattedPrice"),
-        "value", "amount", "min",
-    ) or 0
-    if isinstance(price_raw, str):
-        price_raw = re.sub(r"[^\d]", "", price_raw)
-        price_val = int(price_raw) if price_raw else 0
+    # --- Price (may be a dict: {value, formatted, ...}) ---
+    price_raw = raw.get("price")
+    if isinstance(price_raw, dict):
+        pv = price_raw.get("value") or price_raw.get("amount") or price_raw.get("min") or 0
+        price_val = int(pv)
+    elif isinstance(price_raw, str):
+        cleaned = re.sub(r"[^\d]", "", price_raw)
+        price_val = int(cleaned) if cleaned else 0
     else:
         price_val = int(price_raw or 0)
 
-    size_raw = _scalar(
-        raw.get("floor_area_min") or raw.get("floor_area") or raw.get("size") or raw.get("floorArea"),
-        "value", "min",
+    # --- listingFeatures: [[{iconName, text}, ...], ...] ---
+    bedrooms: int | None = None
+    bathrooms: int | None = None
+    size_from_features: float | None = None
+    for group in (raw.get("listingFeatures") or []):
+        if not isinstance(group, list):
+            continue
+        for feat in group:
+            if not isinstance(feat, dict):
+                continue
+            icon = feat.get("iconName", "")
+            text = str(feat.get("text") or "")
+            if icon == "bed-o":
+                try:
+                    bedrooms = int(text)
+                except (ValueError, TypeError):
+                    pass
+            elif icon == "bath-o":
+                try:
+                    bathrooms = int(text)
+                except (ValueError, TypeError):
+                    pass
+            elif icon in ("area-o", "area", "size") or "sqft" in text.lower() or "sqm" in text.lower():
+                try:
+                    v = float(re.sub(r"[^\d.]", "", text))
+                    if v > 0:
+                        size_from_features = round(v * 10.7639, 1) if v < 200 else v
+                except (ValueError, TypeError):
+                    pass
+
+    # --- property sub-dict: district, postal, tenure, description, size ---
+    prop = raw.get("property") or {}
+
+    district = _normalize_district(
+        prop.get("district") or prop.get("districtCode") or prop.get("district_code")
+        or raw.get("district") or raw.get("district_code")
     )
-    size_sqft: float | None = None
-    if size_raw:
-        try:
-            v = float(re.sub(r"[^\d.]", "", str(size_raw)))
-            size_sqft = round(v * 10.7639, 1) if v < 200 else v
-        except ValueError:
-            pass
 
-    listing_id = str(raw.get("id") or raw.get("listing_id") or raw.get("listingId") or "")
-    url_path = str(_scalar(raw.get("url") or raw.get("listing_url") or raw.get("listingUrl") or "") or "")
-    if url_path and not url_path.startswith("http"):
-        url_path = f"https://www.propertyguru.com.sg{url_path}"
+    postal = (
+        prop.get("postalCode") or prop.get("postal_code")
+        or raw.get("postalCode") or raw.get("postal_code")
+        or _extract_postal(raw.get("fullAddress") or raw.get("shortAddress"))
+    )
 
+    tenure_raw = prop.get("tenure") or prop.get("tenureText") or raw.get("tenure")
+
+    description = str(prop.get("description") or raw.get("description") or "") or None
+
+    # Size: prefer features parse, fall back to property dict
+    size_sqft: float | None = size_from_features
+    if size_sqft is None:
+        size_raw = (
+            prop.get("floorAreaMin") or prop.get("floor_area_min")
+            or prop.get("floorArea") or prop.get("size")
+        )
+        if size_raw:
+            try:
+                v = float(re.sub(r"[^\d.]", "", str(size_raw)))
+                if v > 0:
+                    size_sqft = round(v * 10.7639, 1) if v < 200 else v
+            except (ValueError, TypeError):
+                pass
+
+    # --- Address & project name ---
     address = str(
-        _scalar(raw.get("address") or raw.get("street_name") or raw.get("streetName") or raw.get("location") or "") or ""
+        raw.get("fullAddress") or raw.get("shortAddress")
+        or prop.get("address") or raw.get("address") or ""
     )
-    postal = raw.get("postal_code") or raw.get("postalCode") or _extract_postal(address)
-
-    bedrooms = _scalar(raw.get("bedroom") or raw.get("bedrooms") or raw.get("bedroomCount"))
-    bathrooms = _scalar(raw.get("bathroom") or raw.get("bathrooms") or raw.get("bathroomCount"))
-    tenure_raw = _scalar(raw.get("tenure"))
+    project_name = str(
+        raw.get("localizedTitle") or prop.get("projectName") or prop.get("name")
+        or raw.get("project_name") or raw.get("listingName") or ""
+    )
 
     return Listing(
         source="propertyguru",
         source_id=listing_id,
         url=url_path,
-        project_name=str(_scalar(
-            raw.get("name") or raw.get("project_name") or raw.get("projectName") or
-            raw.get("listing_name") or raw.get("listingName") or ""
-        ) or ""),
+        project_name=project_name,
         address=address,
         postal_code=str(postal) if postal else None,
         district=district,
         price=price_val,
-        bedrooms=int(bedrooms) if bedrooms is not None else None,
-        bathrooms=int(bathrooms) if bathrooms is not None else None,
+        bedrooms=bedrooms,
+        bathrooms=bathrooms,
         size_sqft=size_sqft,
         tenure=str(tenure_raw) if tenure_raw else None,
         image_url=_first_image(raw),
-        description=str(_scalar(raw.get("description") or "") or "") or None,
+        description=description,
         listed_at=raw.get("listing_date") or raw.get("date_formatted") or raw.get("listedAt"),
     )
 
