@@ -8,6 +8,7 @@ from screener.geocoder import geocode, postal_to_district
 from screener.models import Listing
 from screener.mrt import mrt_within_walk
 from screener.schools import schools_within_radius
+from screener.scrapers.ninetynine import NinetyNineScraper
 from screener.scrapers.propertyguru import PropertyGuruScraper
 from screener.shelter import detect_shelter
 
@@ -56,17 +57,30 @@ def main() -> None:
     logger.info("=== Singapore Condo Screener starting ===")
 
     seen_ids = get_seen_ids()
-    logger.info(f"Seen: {len(seen_ids.get('propertyguru', set()))} PropertyGuru IDs in DB")
+    logger.info(
+        f"Seen: {len(seen_ids.get('propertyguru', set()))} PG, "
+        f"{len(seen_ids.get('99co', set()))} 99co IDs in DB"
+    )
 
     pg_scraper = PropertyGuruScraper()
-    pg_listings = []
+    pg_listings: list = []
     try:
         pg_listings = pg_scraper.scrape()
     except Exception as e:
         logger.error(f"[main] PropertyGuru scraper crashed: {e}", exc_info=True)
 
-    all_listings = deduplicate(pg_listings)
-    logger.info(f"Scraped: {len(pg_listings)} raw → {len(all_listings)} after dedup")
+    nco_listings: list = []
+    try:
+        nco_listings = NinetyNineScraper().scrape()
+    except Exception as e:
+        logger.error(f"[main] 99.co scraper crashed: {e}", exc_info=True)
+
+    raw_all = pg_listings + nco_listings
+    all_listings = deduplicate(raw_all)
+    logger.info(
+        f"Scraped: {len(pg_listings)} PG + {len(nco_listings)} 99co = "
+        f"{len(raw_all)} raw → {len(all_listings)} after dedup"
+    )
 
     candidates = [l for l in all_listings if passes_hard_criteria(l)]
     logger.info(f"After hard-filter: {len(candidates)} candidates")
