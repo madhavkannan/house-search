@@ -8,7 +8,7 @@ from screener.geocoder import geocode
 from screener.models import Listing
 from screener.mrt import mrt_within_walk
 from screener.schools import schools_within_radius
-from screener.scrapers.ninetynine import NinetyNineScraper
+from screener.scrapers.edgeprop import EdgePropScraper
 from screener.scrapers.propertyguru import PropertyGuruScraper
 from screener.shelter import detect_shelter
 
@@ -28,7 +28,7 @@ def _enrich(listing: Listing, pg_scraper: PropertyGuruScraper) -> Listing:
         return listing  # Will be excluded downstream
 
     # 2. Fetch detail page if bathrooms still unknown (PropertyGuru only)
-    if listing.bathrooms is None and listing.source == "propertyguru":
+    if listing.bathrooms is None and listing.source in ("propertyguru",):
         listing = pg_scraper.fetch_detail(listing)
 
     # 3. Geocode
@@ -50,7 +50,8 @@ def main() -> None:
     # Step 1: Get already-seen listing IDs from Supabase
     seen_ids = get_seen_ids()
     logger.info(
-        f"Seen: {len(seen_ids['propertyguru'])} PropertyGuru, {len(seen_ids['99co'])} 99.co"
+        f"Seen: {len(seen_ids.get('propertyguru', set()))} PropertyGuru, "
+        f"{len(seen_ids.get('edgeprop', set()))} EdgeProp"
     )
 
     # Step 2: Scrape both sources
@@ -61,14 +62,14 @@ def main() -> None:
     except Exception as e:
         logger.error(f"[main] PropertyGuru scraper crashed: {e}")
 
-    nco_listings = []
+    ep_listings = []
     try:
-        nco_listings = NinetyNineScraper().scrape()
+        ep_listings = EdgePropScraper().scrape()
     except Exception as e:
-        logger.error(f"[main] 99.co scraper crashed: {e}")
+        logger.error(f"[main] EdgeProp scraper crashed: {e}")
 
-    all_listings = pg_listings + nco_listings
-    logger.info(f"Scraped: {len(pg_listings)} PG + {len(nco_listings)} 99.co = {len(all_listings)} total")
+    all_listings = pg_listings + ep_listings
+    logger.info(f"Scraped: {len(pg_listings)} PG + {len(ep_listings)} EdgeProp = {len(all_listings)} total")
 
     # Step 3: Deduplicate cross-source
     all_listings = deduplicate(all_listings)

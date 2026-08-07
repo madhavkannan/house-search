@@ -50,8 +50,13 @@ def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 60_000) -
             page.add_init_script(
                 "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
-            page.goto(full_url, wait_until="networkidle", timeout=timeout_ms)
+            # Use 'load' instead of 'networkidle' — networkidle hangs on Cloudflare challenges
+            page.goto(full_url, wait_until="load", timeout=timeout_ms)
+            # Extra wait for JS-rendered content
+            page.wait_for_timeout(6000)
             html = page.content()
+            if "Just a moment" in html or "cf-browser-verification" in html:
+                logger.warning(f"[browser] Cloudflare challenge detected on {full_url[:80]}")
             browser.close()
             return html
     except Exception as e:
