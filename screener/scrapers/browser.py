@@ -37,7 +37,10 @@ def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 90_000) -
     full_url = _build_url(url, params) if params else url
 
     if SCRAPINGBEE_API_KEY:
-        return _fetch_scrapingbee(full_url)
+        result = _fetch_scrapingbee(full_url)
+        if result is not None:
+            return result
+        logger.info("[browser] ScrapingBee unavailable — falling back to Playwright")
     return _fetch_playwright(full_url, timeout_ms)
 
 
@@ -103,23 +106,43 @@ def _fetch_playwright(url: str, timeout_ms: int) -> str | None:
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage",
-                      "--disable-blink-features=AutomationControlled"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--disable-extensions",
+                    "--window-size=1920,1080",
+                ],
             )
             ctx = browser.new_context(
                 user_agent=_PW_UA,
                 viewport={"width": 1920, "height": 1080},
                 locale="en-US",
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                timezone_id="Asia/Singapore",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                },
             )
             page = ctx.new_page()
-            page.add_init_script(
-                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-            )
-            page.goto(url, wait_until="load", timeout=timeout_ms)
-            page.wait_for_timeout(5000)
+            page.add_init_script("""
+                Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+                Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
+                Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
+                window.chrome={runtime:{}};
+            """)
+            page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            page.wait_for_timeout(3000)
             html = page.content()
             browser.close()
+            if "Just a moment" in html or "cf-browser-verification" in html:
+                logger.warning(f"[playwright] Cloudflare challenge page returned for {url[:80]}")
+                return None
+            logger.info(f"[playwright] Fetched {len(html):,} chars from {url[:80]}")
             return html
     except Exception as e:
         logger.error(f"[playwright] fetch failed: {e}")
