@@ -1,64 +1,103 @@
-"""Shared Playwright browser utility for Cloudflare-protected sites."""
+"""
+Page fetcher with two strategies:
+  1. ScrapingBee (residential IP, JS rendering) — preferred; used when SCRAPINGBEE_API_KEY is set.
+  2. Playwright headless Chromium — fallback for non-Cloudflare sites.
+"""
 import logging
+import os
 from urllib.parse import urlencode
+
+import requests as _requests
 
 logger = logging.getLogger(__name__)
 
-_UA = (
+SCRAPINGBEE_API_KEY = os.environ.get("SCRAPINGBEE_API_KEY", "")
+SCRAPINGBEE_URL = "https://app.scrapingbee.com/api/v1/"
+
+_PW_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0.0.0 Safari/537.36"
 )
 
 
-def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 60_000) -> str | None:
+def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 90_000) -> str | None:
     """
-    Fetch a page using headless Chromium via Playwright.
-    Returns raw HTML string, or None on failure.
+    Fetch a page and return its rendered HTML.
+    Tries ScrapingBee first (when API key present), falls back to Playwright.
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        logger.warning("[browser] playwright not installed — cannot fetch")
-        return None
-
     full_url = url
     if params:
         full_url = f"{url}?{urlencode(params, doseq=True)}"
+
+    if SCRAPINGBEE_API_KEY:
+        return _fetch_scrapingbee(full_url)
+    return _fetch_playwright(full_url, timeout_ms)
+
+
+def _fetch_scrapingbee(url: str) -> str | None:
+    """
+    Fetch via ScrapingBee API — residential IPs, JS rendering.
+    Free tier: 1000 credits/month. render_js=true costs 5 credits/request.
+    """
+    try:
+        resp = _requests.get(
+            SCRAPINGBEE_URL,
+            params={
+                "api_key": SCRAPINGBEE_API_KEY,
+                "url": url,
+                "render_js": "true",
+                "wait": "4000",          # ms to wait after page load
+                "country_code": "sg",    # Singapore exit node
+                "block_ads": "true",
+                "block_resources": "false",  # keep JS/CSS so Cloudflare challenge runs
+                "timeout": "30000",
+            },
+            timeout=60,
+        )
+        if resp.status_code == 200:
+            html = resp.text
+            if "Just a moment" in html or "cf-browser-verification" in html:
+                logger.warning("[scrapingbee] Cloudflare challenge page returned")
+            logger.info(f"[scrapingbee] Fetched {len(html):,} chars from {url[:80]}")
+            return html
+        logger.error(f"[scrapingbee] HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    except Exception as e:
+        logger.error(f"[scrapingbee] Request failed: {e}")
+        return None
+
+
+def _fetch_playwright(url: str, timeout_ms: int) -> str | None:
+    """Fallback: headless Chromium via Playwright."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.warning("[playwright] not installed")
+        return None
 
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                ],
+                args=["--no-sandbox", "--disable-dev-shm-usage",
+                      "--disable-blink-features=AutomationControlled"],
             )
             ctx = browser.new_context(
-                user_agent=_UA,
+                user_agent=_PW_UA,
                 viewport={"width": 1920, "height": 1080},
                 locale="en-US",
-                extra_http_headers={
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                },
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
             )
             page = ctx.new_page()
-            # Patch navigator.webdriver to avoid bot detection
             page.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
             )
-            # Use 'load' instead of 'networkidle' — networkidle hangs on Cloudflare challenges
-            page.goto(full_url, wait_until="load", timeout=timeout_ms)
-            # Extra wait for JS-rendered content
-            page.wait_for_timeout(6000)
+            page.goto(url, wait_until="load", timeout=timeout_ms)
+            page.wait_for_timeout(5000)
             html = page.content()
-            if "Just a moment" in html or "cf-browser-verification" in html:
-                logger.warning(f"[browser] Cloudflare challenge detected on {full_url[:80]}")
             browser.close()
             return html
     except Exception as e:
-        logger.error(f"[browser] Playwright fetch failed for {full_url}: {e}")
+        logger.error(f"[playwright] fetch failed: {e}")
         return None

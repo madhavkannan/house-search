@@ -8,7 +8,7 @@ from bs4 import BeautifulSoup
 
 from screener.config import (
     DISTRICTS, MAX_PRICE, MIN_BATHROOMS, MIN_BEDROOMS, MIN_SIZE_SQFT,
-    PG_PROPERTY_TYPES, PG_SEARCH_URL,
+    PG_MAX_PAGES, PG_PROPERTY_TYPES, PG_SEARCH_URL,
 )
 from screener.models import Listing
 from screener.scrapers.browser import fetch_html
@@ -171,7 +171,7 @@ class PropertyGuruScraper:
 
             logger.info(f"[PropertyGuru] Page {page}: {len(raw_listings)} listings (total={total})")
 
-            if page * PAGE_SIZE >= total:
+            if page * PAGE_SIZE >= total or page >= PG_MAX_PAGES:
                 break
             page += 1
             time.sleep(random.uniform(8, 15))
