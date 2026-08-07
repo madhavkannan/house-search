@@ -65,7 +65,13 @@ def _fetch_scrapingbee(url: str, retries: int = 3) -> str | None:
             if resp.status_code == 200:
                 html = resp.text
                 if "Just a moment" in html or "cf-browser-verification" in html:
-                    logger.warning("[scrapingbee] Cloudflare challenge page returned")
+                    logger.warning(
+                        f"[scrapingbee] Cloudflare challenge page (attempt {attempt}/{retries}, {len(html):,} chars) — retrying"
+                    )
+                    if attempt < retries:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return None
                 logger.info(f"[scrapingbee] Fetched {len(html):,} chars from {url[:80]}")
                 return html
             if resp.status_code == 500:
