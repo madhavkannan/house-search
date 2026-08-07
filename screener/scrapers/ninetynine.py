@@ -165,21 +165,25 @@ class NinetyNineScraper(BaseScraper):
         def _handle_response(response):
             nonlocal total
             url = response.url
+            ct = response.headers.get("content-type", "")
+            # Log ALL 99.co/99group JSON responses so we can see what URLs fire
+            if "99.co" in url or "99group" in url:
+                logger.info(f"[99co-diag] {response.status} {ct[:40]} {url[:120]}")
             if not ("99.co" in url or "99group" in url):
                 return
             if response.status != 200:
                 return
-            ct = response.headers.get("content-type", "")
             if "json" not in ct:
-                return
-            if not any(k in url for k in ("listing", "search", "property")):
                 return
             try:
                 body = response.json()
+                # Log top-level keys so we can see the shape even if listings are 0
+                logger.info(f"[99co-diag] JSON keys: {list(body.keys())[:10]} from {url[:80]}")
                 listings_found = (
                     (body.get("data") or {}).get("listings")
                     or body.get("listings")
                     or (body.get("result") or {}).get("listings")
+                    or (body.get("data") or {}).get("data")
                     or []
                 )
                 if listings_found:
@@ -195,8 +199,8 @@ class NinetyNineScraper(BaseScraper):
                         f"[99co] Intercepted {len(listings_found)} listings "
                         f"from {url[:100]}"
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.info(f"[99co-diag] JSON parse failed for {url[:80]}: {e}")
 
         try:
             with sync_playwright() as p:
