@@ -43,8 +43,10 @@ def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 90_000) -
 
 def _fetch_scrapingbee(url: str, retries: int = 3) -> str | None:
     """
-    Fetch via ScrapingBee API — residential IPs, JS rendering.
-    Free tier: 1000 credits/month. render_js=true costs 5 credits/request.
+    Fetch via ScrapingBee API — residential IPs, plain HTTP fetch.
+    PropertyGuru's __NEXT_DATA__ is SSR'd into initial HTML — no JS execution needed.
+    render_js=false costs 1 credit vs 5, and avoids ScrapingBee's renderer crashing (HTTP 500).
+    Free tier: 1000 credits/month; 1 credit × 5 pages × 2 runs/day × 30d = 300 credits.
     HTTP 500 from ScrapingBee means their server errored (not charged) — retries are safe.
     """
     for attempt in range(1, retries + 1):
@@ -54,11 +56,9 @@ def _fetch_scrapingbee(url: str, retries: int = 3) -> str | None:
                 params={
                     "api_key": SCRAPINGBEE_API_KEY,
                     "url": url,
-                    "render_js": "true",
-                    "wait": "4000",          # ms to wait after page load
-                    "country_code": "sg",    # Singapore exit node
+                    "render_js": "false",
+                    "country_code": "sg",    # Singapore residential IP — bypasses Cloudflare IP block
                     "block_ads": "true",
-                    "block_resources": "false",  # keep JS/CSS so Cloudflare challenge runs
                     "timeout": "30000",
                 },
                 timeout=60,
