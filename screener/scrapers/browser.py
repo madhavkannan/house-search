@@ -1,7 +1,8 @@
 """
-Page fetcher with two strategies:
-  1. ScrapingBee (residential IP, JS rendering) — preferred; used when SCRAPINGBEE_API_KEY is set.
-  2. Playwright headless Chromium — fallback for non-Cloudflare sites.
+Page fetcher with three strategies, tried in order:
+  1. ScrapingBee (residential IP, JS rendering) — preferred.
+  2. curl_cffi Chrome impersonation — bypasses Cloudflare TLS checks without a proxy.
+  3. Playwright headless Chromium — last resort.
 """
 import logging
 import os
@@ -32,7 +33,7 @@ def _build_url(base: str, params: dict) -> str:
 def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 90_000) -> str | None:
     """
     Fetch a page and return its rendered HTML.
-    Tries ScrapingBee first (when API key present), falls back to Playwright.
+    Strategy: ScrapingBee → curl_cffi Chrome impersonation → Playwright.
     """
     full_url = _build_url(url, params) if params else url
 
@@ -40,7 +41,13 @@ def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 90_000) -
         result = _fetch_scrapingbee(full_url)
         if result is not None:
             return result
-        logger.info("[browser] ScrapingBee unavailable — falling back to Playwright")
+        logger.info("[browser] ScrapingBee unavailable — trying curl_cffi")
+
+    result = _fetch_cffi(full_url)
+    if result is not None:
+        return result
+
+    logger.info("[browser] curl_cffi failed — falling back to Playwright")
     return _fetch_playwright(full_url, timeout_ms)
 
 
@@ -91,6 +98,48 @@ def _fetch_scrapingbee(url: str, retries: int = 3) -> str | None:
             logger.error(f"[scrapingbee] Request failed (attempt {attempt}/{retries}): {e}")
             if attempt < retries:
                 time.sleep(2 ** attempt)
+    return None
+
+
+def _fetch_cffi(url: str, retries: int = 2) -> str | None:
+    """
+    Fetch via curl_cffi impersonating Chrome — uses the real Chrome TLS fingerprint
+    which clears Cloudflare's TLS JA3/JA4 checks without a residential proxy.
+    """
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        logger.warning("[cffi] curl_cffi not installed")
+        return None
+
+    for attempt in range(1, retries + 1):
+        try:
+            resp = cffi_requests.get(
+                url,
+                impersonate="chrome120",
+                headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                html = resp.text
+                if "Just a moment" in html or "cf-browser-verification" in html:
+                    logger.warning(f"[cffi] Cloudflare JS challenge page (attempt {attempt}/{retries})")
+                    if attempt < retries:
+                        time.sleep(3)
+                        continue
+                    return None
+                logger.info(f"[cffi] Fetched {len(html):,} chars from {url[:80]}")
+                return html
+            logger.warning(f"[cffi] HTTP {resp.status_code} (attempt {attempt}/{retries})")
+            if attempt < retries:
+                time.sleep(3)
+        except Exception as e:
+            logger.warning(f"[cffi] Request failed (attempt {attempt}/{retries}): {e}")
+            if attempt < retries:
+                time.sleep(3)
     return None
 
 
