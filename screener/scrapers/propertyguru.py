@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import random
+from urllib.parse import quote, urlencode
 
 from bs4 import BeautifulSoup
 
@@ -95,6 +96,86 @@ def _build_params(page: int) -> dict:
     return params
 
 
+def _extract_build_id(html: str) -> str | None:
+    """Extract Next.js buildId from __NEXT_DATA__ — needed for /_next/data API."""
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        tag = soup.find("script", id="__NEXT_DATA__")
+        if tag:
+            data = json.loads(tag.string)
+            return data.get("buildId")
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_nextdata_api(build_id: str, page: int) -> tuple[list[dict], int]:
+    """
+    Fetch via Next.js /_next/data/{buildId}/property-for-sale.json endpoint.
+    This is PG's internal prefetch API — pure JSON, no JS rendering required,
+    which may bypass bot detection that targets the HTML page.
+    """
+    try:
+        from curl_cffi import requests as cffi_requests
+    except ImportError:
+        logger.warning("[nextdata] curl_cffi not installed")
+        return [], 0
+
+    params = _build_params(page)
+    qs = urlencode(params, doseq=True, quote_via=quote).replace("%5B%5D", "[]")
+    next_url = f"https://www.propertyguru.com.sg/_next/data/{build_id}/property-for-sale.json?{qs}"
+    logger.info(f"[nextdata] Trying: {next_url[:200]}")
+
+    for attempt in range(1, 4):
+        try:
+            resp = cffi_requests.get(
+                next_url,
+                impersonate="chrome120",
+                headers={
+                    "Accept": "application/json, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Referer": "https://www.propertyguru.com.sg/property-for-sale",
+                    "x-nextjs-data": "1",
+                },
+                timeout=30,
+            )
+            logger.info(f"[nextdata] HTTP {resp.status_code} (attempt {attempt})")
+            if resp.status_code == 200:
+                data = resp.json()
+                page_props = data.get("pageProps", {})
+                page_data = page_props.get("pageData", {})
+                data_section = (
+                    page_data.get("data", {})
+                    if isinstance(page_data.get("data"), dict) else {}
+                )
+                result_count = page_data.get("resultCount") if isinstance(page_data, dict) else None
+                search_params = page_data.get("searchParams") if isinstance(page_data, dict) else None
+                logger.info(
+                    f"[nextdata] resultCount={result_count}, "
+                    f"pageData keys: {list(page_data.keys())[:20] if isinstance(page_data, dict) else 'N/A'}, "
+                    f"data keys: {list(data_section.keys())[:20] if data_section else 'empty'}"
+                )
+                if search_params:
+                    logger.info(f"[nextdata] searchParams: {json.dumps(search_params)[:600]}")
+                raw_listings = _find_all_listing_dicts(data)
+                total = result_count or len(raw_listings)
+                if raw_listings:
+                    logger.info(f"[nextdata] Found {len(raw_listings)} listings, total={total}")
+                else:
+                    logger.warning(f"[nextdata] 0 listings — full pageData: {json.dumps(page_data)[:1000]}")
+                return raw_listings, total
+            elif resp.status_code in (404, 410):
+                logger.warning(f"[nextdata] {resp.status_code} — buildId may be stale")
+                return [], 0
+            elif attempt < 3:
+                time.sleep(2 ** attempt)
+        except Exception as e:
+            logger.warning(f"[nextdata] Failed (attempt {attempt}): {e}")
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+    return [], 0
+
+
 def _find_all_listing_dicts(obj: object, depth: int = 0) -> list[dict]:
     """
     Walk the entire JSON tree and collect every dict that looks like a property listing.
@@ -143,6 +224,7 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
 
         result_count_ssr = page_data.get("resultCount") if isinstance(page_data, dict) else None
         rbls = page_data.get("rblsRequestParams") if isinstance(page_data, dict) else None
+        search_params_ssr = page_data.get("searchParams") if isinstance(page_data, dict) else None
         logger.info(
             f"[PropertyGuru] pageProps keys: {list(page_props.keys())[:25]}, "
             f"pageData keys: {list(page_data.keys())[:25] if isinstance(page_data, dict) else type(page_data).__name__}, "
@@ -151,6 +233,10 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
         )
         if rbls:
             logger.info(f"[PropertyGuru] rblsRequestParams: {json.dumps(rbls)[:600]}")
+        if search_params_ssr:
+            logger.info(f"[PropertyGuru] searchParams: {json.dumps(search_params_ssr)[:600]}")
+        else:
+            logger.info(f"[PropertyGuru] searchParams: absent — full pageData snippet: {json.dumps(page_data)[:1500] if isinstance(page_data, dict) else str(page_data)[:500]}")
 
         raw_listings: list[dict] = []
         total = 0
@@ -412,6 +498,7 @@ class PropertyGuruScraper:
     def scrape(self) -> list[Listing]:
         listings: list[Listing] = []
         page = 1
+        build_id: str | None = None  # cached for _next/data API fallback
 
         while True:
             logger.info(f"[PropertyGuru] Fetching page {page}...")
@@ -422,13 +509,23 @@ class PropertyGuruScraper:
 
             if html is not None:
                 raw_listings, total = _parse_html(html)
+                # Extract buildId once (page 1) for _next/data API fallback
+                if build_id is None:
+                    build_id = _extract_build_id(html)
+                    if build_id:
+                        logger.info(f"[PropertyGuru] buildId: {build_id}")
             else:
                 logger.error("[PropertyGuru] Scrape aborted — no response from fetch_html")
                 break
 
-            # If SSR parse found nothing, try Playwright intercept to capture client-side API calls
+            # Fallback 1: Next.js /_next/data JSON API — bypasses HTML page bot detection
+            if not raw_listings and build_id:
+                logger.info(f"[PropertyGuru] SSR empty on page {page} — trying _next/data API (buildId={build_id})")
+                raw_listings, total = _fetch_nextdata_api(build_id, page)
+
+            # Fallback 2: Playwright response interception
             if not raw_listings:
-                logger.info(f"[PropertyGuru] SSR parse empty on page {page} — trying Playwright intercept")
+                logger.info(f"[PropertyGuru] _next/data empty on page {page} — trying Playwright intercept")
                 json_responses = fetch_json_intercept(
                     PG_SEARCH_URL, params=_build_params(page), wait_ms=15000
                 )
