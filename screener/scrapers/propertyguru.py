@@ -95,6 +95,31 @@ def _build_params(page: int) -> dict:
     return params
 
 
+def _extract_listings_from_obj(obj: object) -> list[dict]:
+    """Recursively find the first list that looks like property listings."""
+    if isinstance(obj, list) and obj:
+        if isinstance(obj[0], dict) and any(
+            k in obj[0] for k in ("id", "listingId", "price", "bedrooms", "url", "listingData")
+        ):
+            # Unwrap listingData wrapper if present
+            if "listingData" in obj[0] and isinstance(obj[0]["listingData"], dict):
+                return [item["listingData"] for item in obj if isinstance(item.get("listingData"), dict)]
+            return [item for item in obj if isinstance(item, dict)]
+    if isinstance(obj, dict):
+        for key in ("listings", "listingsData", "results", "items", "data", "propertyListings"):
+            val = obj.get(key)
+            if val:
+                result = _extract_listings_from_obj(val)
+                if result:
+                    return result
+        for key, val in obj.items():
+            if isinstance(val, (dict, list)):
+                result = _extract_listings_from_obj(val)
+                if result:
+                    return result
+    return []
+
+
 def _parse_html(html: str) -> tuple[list[dict], int]:
     """Extract raw listing dicts and total count from page HTML."""
     soup = BeautifulSoup(html, "lxml")
@@ -108,28 +133,63 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
         page_data = page_props.get("pageData", {})
         data_section = page_data.get("data", {}) if isinstance(page_data.get("data"), dict) else {}
 
-        # Primary path: pageData.data.listingsData[*].listingData
-        listings_wrappers = data_section.get("listingsData", [])
-        raw_listings = [
-            item["listingData"]
-            for item in listings_wrappers
-            if isinstance(item.get("listingData"), dict)
-        ]
+        raw_listings: list[dict] = []
+        total = 0
 
-        # Fallback paths for resilience
+        # Path 1: pageData.data.listingsData[*].listingData (old structure)
+        listings_wrappers = data_section.get("listingsData", [])
+        if listings_wrappers:
+            raw_listings = [
+                item["listingData"]
+                for item in listings_wrappers
+                if isinstance(item.get("listingData"), dict)
+            ]
+
+        # Path 2: pageData.data.searchResultConfig — current structure (2025+)
+        if not raw_listings:
+            src = data_section.get("searchResultConfig")
+            if isinstance(src, dict):
+                logger.info(f"[PropertyGuru] searchResultConfig keys: {list(src.keys())[:20]}")
+                raw_listings = _extract_listings_from_obj(src)
+                total = src.get("total") or src.get("resultCount") or 0
+
+        # Path 3: pageData.data.tabsViewData
+        if not raw_listings:
+            tvd = data_section.get("tabsViewData")
+            if tvd:
+                raw_listings = _extract_listings_from_obj(tvd)
+
+        # Path 4: pageData.data.eligiblePropertiesData
+        if not raw_listings:
+            epd = data_section.get("eligiblePropertiesData")
+            if epd:
+                raw_listings = _extract_listings_from_obj(epd)
+
+        # Path 5: pageProps.marketplace
+        if not raw_listings:
+            mp = page_props.get("marketplace")
+            if mp:
+                raw_listings = _extract_listings_from_obj(mp)
+                if isinstance(mp, dict):
+                    total = total or mp.get("total") or mp.get("resultCount") or 0
+
+        # Path 6: legacy top-level pageProps keys
         if not raw_listings:
             raw_listings = (
                 page_props.get("listings")
                 or page_props.get("searchListingData", {}).get("listings", [])
                 or []
             )
+            if not isinstance(raw_listings, list):
+                raw_listings = []
 
-        total = (
-            page_props.get("total")
-            or page_props.get("searchListingData", {}).get("total", 0)
-            or page_data.get("resultCount", 0)
-            or len(raw_listings)
-        )
+        if not total:
+            total = (
+                page_props.get("total")
+                or (page_props.get("searchListingData") or {}).get("total", 0)
+                or page_data.get("resultCount", 0)
+                or len(raw_listings)
+            )
 
         if not raw_listings:
             logger.warning(
@@ -137,6 +197,8 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
                 f"pageData keys: {list(page_data.keys())[:20] if isinstance(page_data, dict) else type(page_data).__name__}, "
                 f"data keys: {list(data_section.keys())[:20] if data_section else 'empty'}"
             )
+        else:
+            logger.info(f"[PropertyGuru] Found {len(raw_listings)} raw listings, total={total}")
 
         return raw_listings, total
     except (json.JSONDecodeError, KeyError, TypeError) as e:
