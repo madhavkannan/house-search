@@ -26,25 +26,30 @@ _NCO_BASE = "https://www.99.co"
 # /singapore redirects (301) to / on the new Next.js App Router site
 _NCO_SEARCH_PAGE = _NCO_BASE
 
-# Candidate listing-search API paths to probe (all under /api/{version}/)
+# Candidate listing-search API paths (all under /api/{version}/).
+# Ordered by likelihood — web/search/* inferred from intercepted count endpoint.
 _LISTING_PATHS = [
+    "web/search/listings",
+    "web/search/filtered-listings",
     "web/listings/search",
     "listings/search",
-    "web/search/listings",
     "search/listings",
     "web/listings",
     "listings",
     "web/properties/search",
 ]
 
-# Candidate search page URLs — tried in order until one loads listing data
+# Candidate search page URLs — tried in order until one loads listing data.
+# Locale-prefixed (/en/) first: 99.co migrated to Next.js App Router with [locale] routing.
 _SEARCH_PAGE_URLS = [
+    f"{_NCO_BASE}/en/singapore/condos-apartments-for-sale",
+    f"{_NCO_BASE}/en/singapore/property-for-sale",
+    f"{_NCO_BASE}/en/buy",
+    f"{_NCO_BASE}/en/singapore",
     f"{_NCO_BASE}/singapore/for-sale",
     f"{_NCO_BASE}/singapore/property-for-sale",
     f"{_NCO_BASE}/singapore/condos-apartments-for-sale",
-    f"{_NCO_BASE}/singapore/sale",
     f"{_NCO_BASE}/buy",
-    f"{_NCO_BASE}/singapore",
     _NCO_BASE,
 ]
 
@@ -167,9 +172,10 @@ class NinetyNineScraper(BaseScraper):
     SOURCE_NAME = "99co"
 
     def _api_params(self, page: int) -> dict:
+        # property_segments=residential confirmed from intercepted /web/search/filtered-listings-count XHR
         params = {
             "listing_type": "sale",
-            "main_category": "residential",
+            "property_segments": "residential",
             "sub_categories[]": ["condo", "apartment"],
             "price_max": MAX_PRICE,
             "bedrooms_min": MIN_BEDROOMS,
@@ -282,10 +288,12 @@ class NinetyNineScraper(BaseScraper):
             nonlocal total
             url = response.url
             ct = response.headers.get("content-type", "")
-            if "99.co" in url or "99group" in url:
-                logger.info(f"[99co-diag] {response.status} {ct[:40]} {url[:120]}")
-            if not ("99.co" in url or "99group" in url):
+            is_99 = "99.co" in url or "99group" in url
+            if not is_99:
                 return
+            # Log only JSON responses — suppressing JS/CSS/image noise keeps log tail readable
+            if "json" in ct:
+                logger.info(f"[99co-diag] {response.status} {url}")
             if response.status != 200:
                 return
             if "json" not in ct:
