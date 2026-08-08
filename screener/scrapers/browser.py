@@ -66,7 +66,7 @@ def _fetch_scrapingbee(url: str, retries: int = 3) -> str | None:
                     "url": url,
                     "render_js": "true",
                     "premium_proxy": "true",   # needed for Cloudflare Bot Management; costs 25 credits/req
-                    "wait": "4000",
+                    "wait": "6000",
                     "country_code": "sg",
                     "timeout": "30000",
                 },

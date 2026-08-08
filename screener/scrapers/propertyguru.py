@@ -78,7 +78,7 @@ def _first_image(raw: dict) -> str | None:
 
 
 def _build_params(page: int) -> dict:
-    return {
+    params: dict = {
         "listing_type": "sale",
         "search": "true",
         "maxprice": MAX_PRICE,
@@ -88,7 +88,11 @@ def _build_params(page: int) -> dict:
         "sort": "date",
         "order": "desc",
         "page": page,
+        # Filter at URL level — reduces ScrapingBee credit burn on irrelevant pages
+        "property_type_code[]": PG_PROPERTY_TYPES,
+        "district_code[]": _district_codes(),
     }
+    return params
 
 
 def _parse_html(html: str) -> tuple[list[dict], int]:
@@ -128,7 +132,11 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
         )
 
         if not raw_listings:
-            logger.warning("[PropertyGuru] No listings found in any known path")
+            logger.warning(
+                f"[PropertyGuru] No listings found — pageProps keys: {list(page_props.keys())[:20]}, "
+                f"pageData keys: {list(page_data.keys())[:20] if isinstance(page_data, dict) else type(page_data).__name__}, "
+                f"data keys: {list(data_section.keys())[:20] if data_section else 'empty'}"
+            )
 
         return raw_listings, total
     except (json.JSONDecodeError, KeyError, TypeError) as e:
