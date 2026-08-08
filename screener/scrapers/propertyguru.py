@@ -515,8 +515,7 @@ class PropertyGuruScraper:
                     if build_id:
                         logger.info(f"[PropertyGuru] buildId: {build_id}")
             else:
-                logger.error("[PropertyGuru] Scrape aborted — no response from fetch_html")
-                break
+                logger.warning("[PropertyGuru] fetch_html returned None — skipping SSR parse, trying fallbacks")
 
             # Fallback 1: Next.js /_next/data JSON API — bypasses HTML page bot detection
             if not raw_listings and build_id:
@@ -532,7 +531,10 @@ class PropertyGuruScraper:
                 raw_listings, total = _find_listings_in_json_responses(json_responses)
 
             if not raw_listings:
-                logger.info(f"[PropertyGuru] No listings on page {page} — stopping")
+                if html is None and build_id is None:
+                    logger.error("[PropertyGuru] Scrape aborted — fetch_html failed and no buildId for _next/data")
+                else:
+                    logger.info(f"[PropertyGuru] No listings on page {page} — stopping")
                 break
 
             for raw in raw_listings:

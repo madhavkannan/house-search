@@ -51,54 +51,65 @@ def fetch_html(url: str, params: dict | None = None, timeout_ms: int = 90_000) -
     return _fetch_playwright(full_url, timeout_ms)
 
 
-def _fetch_scrapingbee(url: str, retries: int = 3) -> str | None:
+def _fetch_scrapingbee(url: str, retries: int = 3, extra_params: dict | None = None) -> str | None:
     """
-    Fetch via ScrapingBee API — residential IPs, JS rendering for Cloudflare bypass.
-    Free tier: 1000 credits/month. render_js=true costs 5 credits/request.
+    Fetch via ScrapingBee API — JS rendering for Cloudflare bypass.
+    Tries stealth_proxy first (ultra-residential, less flagged), then premium_proxy as fallback.
     HTTP 500 from ScrapingBee means their server errored (not charged) — retries are safe.
     """
-    for attempt in range(1, retries + 1):
-        try:
-            resp = _requests.get(
-                SCRAPINGBEE_URL,
-                params={
+    # Two proxy strategies: stealth first, then premium as fallback
+    proxy_strategies = [
+        {"stealth_proxy": "true", "wait": "12000", "timeout": "35000"},
+        {"premium_proxy": "true", "wait": "10000", "timeout": "30000"},
+    ]
+    for strategy in proxy_strategies:
+        strategy_name = "stealth" if "stealth_proxy" in strategy else "premium"
+        for attempt in range(1, retries + 1):
+            try:
+                params = {
                     "api_key": SCRAPINGBEE_API_KEY,
                     "url": url,
                     "render_js": "true",
-                    "premium_proxy": "true",   # needed for Cloudflare Bot Management; costs 25 credits/req
-                    "block_resources": "false",  # ScrapingBee recommends false when hitting 500 errors
-                    "wait": "8000",
+                    "block_resources": "false",
                     "country_code": "sg",
-                    "timeout": "30000",
-                },
-                timeout=120,  # premium_proxy + render_js can take 60-90s
-            )
-            if resp.status_code == 200:
-                html = resp.text
-                if "Just a moment" in html or "cf-browser-verification" in html:
+                    **strategy,
+                }
+                if extra_params:
+                    params.update(extra_params)
+                resp = _requests.get(
+                    SCRAPINGBEE_URL,
+                    params=params,
+                    timeout=150,
+                )
+                if resp.status_code == 200:
+                    html = resp.text
+                    if "Just a moment" in html or "cf-browser-verification" in html:
+                        logger.warning(
+                            f"[scrapingbee-{strategy_name}] Cloudflare challenge page "
+                            f"(attempt {attempt}/{retries}, {len(html):,} chars) — retrying"
+                        )
+                        if attempt < retries:
+                            time.sleep(2 ** attempt)
+                            continue
+                        # strategy exhausted — try next
+                        break
+                    logger.info(f"[scrapingbee-{strategy_name}] Fetched {len(html):,} chars from {url[:80]}")
+                    return html
+                if resp.status_code == 500:
                     logger.warning(
-                        f"[scrapingbee] Cloudflare challenge page (attempt {attempt}/{retries}, {len(html):,} chars) — retrying"
+                        f"[scrapingbee-{strategy_name}] HTTP 500 (attempt {attempt}/{retries}): {resp.text[:200]}"
                     )
                     if attempt < retries:
                         time.sleep(2 ** attempt)
                         continue
-                    return None
-                logger.info(f"[scrapingbee] Fetched {len(html):,} chars from {url[:80]}")
-                return html
-            if resp.status_code == 500:
-                logger.warning(
-                    f"[scrapingbee] HTTP 500 (attempt {attempt}/{retries}): {resp.text[:200]}"
-                )
+                else:
+                    logger.error(f"[scrapingbee-{strategy_name}] HTTP {resp.status_code}: {resp.text[:200]}")
+                    break  # non-retryable error for this strategy
+            except Exception as e:
+                logger.error(f"[scrapingbee-{strategy_name}] Request failed (attempt {attempt}/{retries}): {e}")
                 if attempt < retries:
                     time.sleep(2 ** attempt)
-                    continue
-            else:
-                logger.error(f"[scrapingbee] HTTP {resp.status_code}: {resp.text[:200]}")
-                return None
-        except Exception as e:
-            logger.error(f"[scrapingbee] Request failed (attempt {attempt}/{retries}): {e}")
-            if attempt < retries:
-                time.sleep(2 ** attempt)
+        logger.info(f"[scrapingbee] {strategy_name} strategy exhausted — trying next strategy")
     return None
 
 

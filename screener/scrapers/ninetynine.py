@@ -214,10 +214,11 @@ class NinetyNineScraper(BaseScraper):
     SOURCE_NAME = "99co"
 
     def _api_params(self, page: int) -> dict:
-        # property_segments=residential confirmed from intercepted /web/search/filtered-listings-count XHR
+        # rental_type=all confirmed present in intercepted /web/search/filtered-listings-count XHR
         params = {
             "listing_type": "sale",
             "property_segments": "residential",
+            "rental_type": "all",
             "sub_categories[]": ["condo", "apartment"],
             "price_max": MAX_PRICE,
             "bedrooms_min": MIN_BEDROOMS,
@@ -232,37 +233,50 @@ class NinetyNineScraper(BaseScraper):
         params["districts[]"] = DISTRICT_INTS
         return params
 
+    def _api_params_minimal(self, page: int) -> dict:
+        """Minimal params matching the working filtered-listings-count endpoint exactly."""
+        return {
+            "listing_type": "sale",
+            "property_segments": "residential",
+            "rental_type": "all",
+            "page_size": PAGE_SIZE,
+            "page_num": page,
+        }
+
     def _try_api(self, page: int) -> requests.Response | None:
         """Try each API version × path combination until one returns listings."""
-        params = self._api_params(page)
+        params_full = self._api_params(page)
+        params_minimal = self._api_params_minimal(page)
+        headers = {
+            "Accept": "application/json",
+            "Referer": _NCO_SEARCH_PAGE,
+            "X-Requested-With": "XMLHttpRequest",
+        }
         for version in _API_VERSIONS:
             for path in _LISTING_PATHS:
                 url = f"{_NCO_BASE}/api/{version}/{path}"
-                resp = self._get(
-                    url,
-                    params=params,
-                    headers={
-                        "Accept": "application/json",
-                        "Referer": _NCO_SEARCH_PAGE,
-                        "X-Requested-With": "XMLHttpRequest",
-                    },
-                    accept="application/json",
-                    retries=1,
-                )
-                if resp is not None:
-                    try:
-                        body = resp.json()
-                        # Accept any response that contains listing data
-                        has_listings = (
-                            (body.get("data") or {}).get("listings")
-                            or body.get("listings")
-                            or (body.get("result") or {}).get("listings")
-                        )
-                        if has_listings or body.get("status") == "success":
-                            logger.info(f"[99co] API {version}/{path} responded OK")
-                            return resp
-                    except Exception:
-                        pass
+                # Try full params first, then minimal (matching the working count endpoint)
+                for label, params in (("full", params_full), ("minimal", params_minimal)):
+                    resp = self._get(url, params=params, headers=headers, accept="application/json", retries=1)
+                    if resp is not None:
+                        try:
+                            body = resp.json()
+                            has_listings = (
+                                (body.get("data") or {}).get("listings")
+                                or body.get("listings")
+                                or (body.get("result") or {}).get("listings")
+                            )
+                            logger.info(
+                                f"[99co] {version}/{path} [{label}] → HTTP 200, "
+                                f"keys={list(body.keys())[:8]}, "
+                                f"has_listings={bool(has_listings)}"
+                            )
+                            if has_listings:
+                                return resp
+                        except Exception as e:
+                            logger.info(f"[99co] {version}/{path} [{label}] → 200 but parse failed: {e}")
+                    # If _get returned None, the base class already logged the error
+        logger.warning("[99co] All API combinations exhausted — no listings endpoint found")
         return None
 
     def _scrape_via_api(self) -> list[Listing] | None:
