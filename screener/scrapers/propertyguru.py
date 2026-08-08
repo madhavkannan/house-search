@@ -95,29 +95,34 @@ def _build_params(page: int) -> dict:
     return params
 
 
-def _extract_listings_from_obj(obj: object) -> list[dict]:
-    """Recursively find the first list that looks like property listings."""
-    if isinstance(obj, list) and obj:
-        if isinstance(obj[0], dict) and any(
-            k in obj[0] for k in ("id", "listingId", "price", "bedrooms", "url", "listingData")
-        ):
-            # Unwrap listingData wrapper if present
-            if "listingData" in obj[0] and isinstance(obj[0]["listingData"], dict):
-                return [item["listingData"] for item in obj if isinstance(item.get("listingData"), dict)]
-            return [item for item in obj if isinstance(item, dict)]
+def _find_all_listing_dicts(obj: object, depth: int = 0) -> list[dict]:
+    """
+    Walk the entire JSON tree and collect every dict that looks like a property listing.
+    Matches on price > 100k (as int or nested dict) + any of bedrooms/id/url.
+    """
+    if depth > 25:
+        return []
+    results: list[dict] = []
     if isinstance(obj, dict):
-        for key in ("listings", "listingsData", "results", "items", "data", "propertyListings"):
-            val = obj.get(key)
-            if val:
-                result = _extract_listings_from_obj(val)
-                if result:
-                    return result
-        for key, val in obj.items():
-            if isinstance(val, (dict, list)):
-                result = _extract_listings_from_obj(val)
-                if result:
-                    return result
-    return []
+        price = obj.get("price")
+        price_val = (
+            price if isinstance(price, (int, float))
+            else price.get("value") if isinstance(price, dict)
+            else None
+        )
+        if price_val and price_val > 100_000 and any(
+            k in obj for k in ("bedrooms", "bathrooms", "id", "url", "address", "localizedTitle")
+        ):
+            results.append(obj)
+        else:
+            for val in obj.values():
+                if isinstance(val, (dict, list)):
+                    results.extend(_find_all_listing_dicts(val, depth + 1))
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                results.extend(_find_all_listing_dicts(item, depth + 1))
+    return results
 
 
 def _parse_html(html: str) -> tuple[list[dict], int]:
@@ -126,12 +131,21 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
     script_tag = soup.find("script", id="__NEXT_DATA__")
     if not script_tag:
         logger.error("[PropertyGuru] __NEXT_DATA__ not found in page")
+        # Last-resort: count price-like patterns in raw HTML to confirm data is present
+        price_hits = len(re.findall(r'"price"\s*:\s*[1-9]\d{5,}', html))
+        logger.error(f"[PropertyGuru] Raw HTML price-pattern hits: {price_hits}")
         return [], 0
     try:
         data = json.loads(script_tag.string)
         page_props = data["props"]["pageProps"]
         page_data = page_props.get("pageData", {})
         data_section = page_data.get("data", {}) if isinstance(page_data.get("data"), dict) else {}
+
+        logger.info(
+            f"[PropertyGuru] pageProps keys: {list(page_props.keys())[:25]}, "
+            f"pageData keys: {list(page_data.keys())[:25] if isinstance(page_data, dict) else type(page_data).__name__}, "
+            f"data keys: {list(data_section.keys())[:25] if data_section else 'empty'}"
+        )
 
         raw_listings: list[dict] = []
         total = 0
@@ -144,45 +158,34 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
                 for item in listings_wrappers
                 if isinstance(item.get("listingData"), dict)
             ]
+            logger.info(f"[PropertyGuru] Path1 (listingsData): {len(raw_listings)} listings")
 
-        # Path 2: pageData.data.searchResultConfig — current structure (2025+)
+        # Path 2: walk the entire data_section tree for any dict with price+listing keys
+        if not raw_listings and data_section:
+            raw_listings = _find_all_listing_dicts(data_section)
+            if raw_listings:
+                logger.info(f"[PropertyGuru] Path2 (tree-walk data_section): {len(raw_listings)} listings")
+
+        # Path 3: walk pageProps (excluding pageData to avoid re-scan)
         if not raw_listings:
-            src = data_section.get("searchResultConfig")
-            if isinstance(src, dict):
-                logger.info(f"[PropertyGuru] searchResultConfig keys: {list(src.keys())[:20]}")
-                raw_listings = _extract_listings_from_obj(src)
-                total = src.get("total") or src.get("resultCount") or 0
+            pp_without_pagedata = {k: v for k, v in page_props.items() if k != "pageData"}
+            raw_listings = _find_all_listing_dicts(pp_without_pagedata)
+            if raw_listings:
+                logger.info(f"[PropertyGuru] Path3 (tree-walk pageProps): {len(raw_listings)} listings")
 
-        # Path 3: pageData.data.tabsViewData
+        # Path 4: walk the entire __NEXT_DATA__ tree as absolute last resort
         if not raw_listings:
-            tvd = data_section.get("tabsViewData")
-            if tvd:
-                raw_listings = _extract_listings_from_obj(tvd)
+            raw_listings = _find_all_listing_dicts(data)
+            if raw_listings:
+                logger.info(f"[PropertyGuru] Path4 (tree-walk full NEXT_DATA): {len(raw_listings)} listings")
 
-        # Path 4: pageData.data.eligiblePropertiesData
-        if not raw_listings:
-            epd = data_section.get("eligiblePropertiesData")
-            if epd:
-                raw_listings = _extract_listings_from_obj(epd)
-
-        # Path 5: pageProps.marketplace
-        if not raw_listings:
-            mp = page_props.get("marketplace")
-            if mp:
-                raw_listings = _extract_listings_from_obj(mp)
-                if isinstance(mp, dict):
-                    total = total or mp.get("total") or mp.get("resultCount") or 0
-
-        # Path 6: legacy top-level pageProps keys
-        if not raw_listings:
-            raw_listings = (
-                page_props.get("listings")
-                or page_props.get("searchListingData", {}).get("listings", [])
-                or []
-            )
-            if not isinstance(raw_listings, list):
-                raw_listings = []
-
+        # Extract total from known locations
+        if data_section:
+            for key in ("total", "resultCount", "totalCount", "listingCount"):
+                val = data_section.get(key)
+                if isinstance(val, int) and val > 0:
+                    total = val
+                    break
         if not total:
             total = (
                 page_props.get("total")
@@ -192,11 +195,20 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
             )
 
         if not raw_listings:
+            # Diagnostic: scan raw HTML for price patterns to confirm data is present
+            price_hits = len(re.findall(r'"price"\s*:\s*[1-9]\d{5,}', html))
             logger.warning(
-                f"[PropertyGuru] No listings found — pageProps keys: {list(page_props.keys())[:20]}, "
-                f"pageData keys: {list(page_data.keys())[:20] if isinstance(page_data, dict) else type(page_data).__name__}, "
-                f"data keys: {list(data_section.keys())[:20] if data_section else 'empty'}"
+                f"[PropertyGuru] No listings found — raw HTML price-pattern hits: {price_hits}, "
+                f"__NEXT_DATA__ size: {len(script_tag.string):,} chars"
             )
+            # Log tabsViewData / eligiblePropertiesData structure for diagnosis
+            for diag_key in ("tabsViewData", "eligiblePropertiesData", "searchResultConfig", "recommendationsConfig"):
+                val = data_section.get(diag_key)
+                if val is not None:
+                    if isinstance(val, dict):
+                        logger.info(f"[PropertyGuru] {diag_key} keys: {list(val.keys())[:20]}")
+                    elif isinstance(val, list):
+                        logger.info(f"[PropertyGuru] {diag_key} list len={len(val)}, first item type: {type(val[0]).__name__ if val else 'empty'}")
         else:
             logger.info(f"[PropertyGuru] Found {len(raw_listings)} raw listings, total={total}")
 
