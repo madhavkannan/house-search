@@ -11,7 +11,7 @@ from screener.config import (
     PG_MAX_PAGES, PG_PROPERTY_TYPES, PG_SEARCH_URL,
 )
 from screener.models import Listing
-from screener.scrapers.browser import fetch_html
+from screener.scrapers.browser import fetch_html, fetch_json_intercept
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +218,38 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
         return [], 0
 
 
+def _find_listings_in_json_responses(responses: list[dict]) -> tuple[list[dict], int]:
+    """Search all intercepted JSON API responses for listing dicts."""
+    all_listings: list[dict] = []
+    total = 0
+
+    for resp in responses:
+        resp_url = resp.get("url", "")
+        data = resp.get("data")
+        if not data:
+            continue
+        found = _find_all_listing_dicts(data)
+        if found:
+            logger.info(f"[PropertyGuru] Intercept found {len(found)} listings in: {resp_url[:100]}")
+            all_listings.extend(found)
+            if isinstance(data, dict):
+                for key in ("total", "resultCount", "totalCount", "listingCount", "count"):
+                    val = data.get(key)
+                    if isinstance(val, int) and val > total:
+                        total = val
+        else:
+            # Log all JSON URLs that returned nothing so we can diagnose
+            logger.debug(f"[PropertyGuru] Intercept no-listings from: {resp_url[:100]}")
+
+    if not all_listings:
+        logger.warning(
+            f"[PropertyGuru] Intercept found 0 listings across {len(responses)} JSON responses. "
+            f"URLs: {[r['url'][:80] for r in responses[:10]]}"
+        )
+
+    return all_listings, total or len(all_listings)
+
+
 def _scalar(v: object, *fallback_keys_in_dict: str) -> object:
     """If v is a dict, extract a scalar from it using common keys."""
     if not isinstance(v, dict):
@@ -363,11 +395,23 @@ class PropertyGuruScraper:
         while True:
             logger.info(f"[PropertyGuru] Fetching page {page}...")
             html = fetch_html(PG_SEARCH_URL, params=_build_params(page))
-            if html is None:
-                logger.error("[PropertyGuru] Scrape aborted — no response")
+
+            raw_listings: list[dict] = []
+            total = 0
+
+            if html is not None:
+                raw_listings, total = _parse_html(html)
+            else:
+                logger.error("[PropertyGuru] Scrape aborted — no response from fetch_html")
                 break
 
-            raw_listings, total = _parse_html(html)
+            # If SSR parse found nothing, try Playwright intercept to capture client-side API calls
+            if not raw_listings:
+                logger.info(f"[PropertyGuru] SSR parse empty on page {page} — trying Playwright intercept")
+                json_responses = fetch_json_intercept(
+                    PG_SEARCH_URL, params=_build_params(page), wait_ms=15000
+                )
+                raw_listings, total = _find_listings_in_json_responses(json_responses)
 
             if not raw_listings:
                 logger.info(f"[PropertyGuru] No listings on page {page} — stopping")

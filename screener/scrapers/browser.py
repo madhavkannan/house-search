@@ -144,6 +144,83 @@ def _fetch_cffi(url: str, retries: int = 2) -> str | None:
     return None
 
 
+def fetch_json_intercept(url: str, params: dict | None = None, wait_ms: int = 15000) -> list[dict]:
+    """
+    Navigate to URL with Playwright and capture all JSON API responses fired by the page.
+    Returns list of {"url": ..., "data": ...} dicts.
+    Useful when a site loads listings via client-side XHR/fetch rather than SSR.
+    """
+    full_url = _build_url(url, params) if params else url
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.warning("[intercept] playwright not installed")
+        return []
+
+    captured: list[dict] = []
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-infobars",
+                    "--disable-extensions",
+                    "--window-size=1920,1080",
+                ],
+            )
+            ctx = browser.new_context(
+                user_agent=_PW_UA,
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US",
+                timezone_id="Asia/Singapore",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"Windows"',
+                },
+            )
+            page = ctx.new_page()
+            page.add_init_script("""
+                Object.defineProperty(navigator,'webdriver',{get:()=>undefined});
+                Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});
+                Object.defineProperty(navigator,'languages',{get:()=>['en-US','en']});
+                window.chrome={runtime:{}};
+            """)
+
+            def on_response(response):
+                try:
+                    ct = response.headers.get("content-type", "")
+                    if response.status == 200 and "json" in ct:
+                        body = response.json()
+                        captured.append({"url": response.url, "data": body})
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+
+            try:
+                page.goto(full_url, wait_until="load", timeout=60000)
+            except Exception as e:
+                logger.warning(f"[intercept] Page load warning (continuing): {e}")
+
+            page.wait_for_timeout(wait_ms)
+            browser.close()
+
+        logger.info(f"[intercept] Captured {len(captured)} JSON responses from {full_url[:80]}")
+        for r in captured:
+            logger.debug(f"[intercept]   {r['url'][:100]}")
+        return captured
+    except Exception as e:
+        logger.error(f"[intercept] Failed: {e}")
+        return []
+
+
 def _fetch_playwright(url: str, timeout_ms: int) -> str | None:
     """Fallback: headless Chromium via Playwright."""
     try:
