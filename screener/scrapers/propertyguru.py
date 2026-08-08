@@ -141,11 +141,16 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
         page_data = page_props.get("pageData", {})
         data_section = page_data.get("data", {}) if isinstance(page_data.get("data"), dict) else {}
 
+        result_count_ssr = page_data.get("resultCount") if isinstance(page_data, dict) else None
+        rbls = page_data.get("rblsRequestParams") if isinstance(page_data, dict) else None
         logger.info(
             f"[PropertyGuru] pageProps keys: {list(page_props.keys())[:25]}, "
             f"pageData keys: {list(page_data.keys())[:25] if isinstance(page_data, dict) else type(page_data).__name__}, "
-            f"data keys: {list(data_section.keys())[:25] if data_section else 'empty'}"
+            f"data keys: {list(data_section.keys())[:25] if data_section else 'empty'}, "
+            f"resultCount={result_count_ssr}"
         )
+        if rbls:
+            logger.info(f"[PropertyGuru] rblsRequestParams: {json.dumps(rbls)[:600]}")
 
         raw_listings: list[dict] = []
         total = 0
@@ -194,11 +199,27 @@ def _parse_html(html: str) -> tuple[list[dict], int]:
                 or len(raw_listings)
             )
 
+        # Path 5: JSON-LD structured data (<script type="application/ld+json">)
+        # PG embeds schema.org markup for SEO which may contain listing info
+        if not raw_listings:
+            for ld_tag in soup.find_all("script", type="application/ld+json"):
+                try:
+                    ld = json.loads(ld_tag.string or "")
+                    found = _find_all_listing_dicts(ld)
+                    if found:
+                        raw_listings.extend(found)
+                        logger.info(f"[PropertyGuru] Path5 (JSON-LD): {len(found)} listings")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
         if not raw_listings:
             # Diagnostic: scan raw HTML for price patterns to confirm data is present
             price_hits = len(re.findall(r'"price"\s*:\s*[1-9]\d{5,}', html))
+            # Also scan for schema.org price patterns
+            price_hits2 = len(re.findall(r'"salePrice"|"priceSpecification"|"offers"', html))
             logger.warning(
                 f"[PropertyGuru] No listings found — raw HTML price-pattern hits: {price_hits}, "
+                f"schema-price hits: {price_hits2}, "
                 f"__NEXT_DATA__ size: {len(script_tag.string):,} chars"
             )
             # Log tabsViewData / eligiblePropertiesData structure for diagnosis

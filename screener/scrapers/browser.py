@@ -193,8 +193,11 @@ def fetch_json_intercept(url: str, params: dict | None = None, wait_ms: int = 15
                 window.chrome={runtime:{}};
             """)
 
+            all_urls: list[str] = []
+
             def on_response(response):
                 try:
+                    all_urls.append(f"{response.status} {response.url[:120]}")
                     ct = response.headers.get("content-type", "")
                     if response.status == 200 and "json" in ct:
                         body = response.json()
@@ -210,11 +213,21 @@ def fetch_json_intercept(url: str, params: dict | None = None, wait_ms: int = 15
                 logger.warning(f"[intercept] Page load warning (continuing): {e}")
 
             page.wait_for_timeout(wait_ms)
+
+            # Log page state for diagnosis
+            try:
+                final_url = page.url
+                content_snippet = page.content()[:300]
+                cf_blocked = "Just a moment" in content_snippet or "cf-browser-verification" in content_snippet
+                logger.info(f"[intercept] Final URL: {final_url[:100]}, CF-blocked: {cf_blocked}")
+            except Exception:
+                pass
+
             browser.close()
 
-        logger.info(f"[intercept] Captured {len(captured)} JSON responses from {full_url[:80]}")
-        for r in captured:
-            logger.debug(f"[intercept]   {r['url'][:100]}")
+        logger.info(f"[intercept] Captured {len(captured)} JSON responses, {len(all_urls)} total responses")
+        for u in all_urls[:30]:
+            logger.info(f"[intercept-url]   {u}")
         return captured
     except Exception as e:
         logger.error(f"[intercept] Failed: {e}")
