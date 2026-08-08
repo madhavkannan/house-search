@@ -39,11 +39,14 @@ _LISTING_PATHS = [
     "web/properties/search",
 ]
 
+_TOP_NAV_JSON = "https://assets-static.99.co/static/json-configs/top-nav/top-nav-en-v1.json"
+
 # Candidate search page URLs — tried in order until one loads listing data.
 # Locale-prefixed (/en/) first: 99.co migrated to Next.js App Router with [locale] routing.
-_SEARCH_PAGE_URLS = [
+_SEARCH_PAGE_URLS_BASE = [
     f"{_NCO_BASE}/en/singapore/condos-apartments-for-sale",
     f"{_NCO_BASE}/en/singapore/property-for-sale",
+    f"{_NCO_BASE}/en/buy/singapore",
     f"{_NCO_BASE}/en/buy",
     f"{_NCO_BASE}/en/singapore",
     f"{_NCO_BASE}/singapore/for-sale",
@@ -52,6 +55,39 @@ _SEARCH_PAGE_URLS = [
     f"{_NCO_BASE}/buy",
     _NCO_BASE,
 ]
+
+
+def _discover_search_urls() -> list[str]:
+    """
+    Fetch the top-nav JSON to extract real navigation links for buy/sale.
+    Returns discovered URLs prepended before the static fallback list.
+    """
+    discovered: list[str] = []
+    try:
+        resp = requests.get(_TOP_NAV_JSON, timeout=10)
+        if resp.status_code == 200:
+            nav = resp.json()
+            primary = nav.get("primaryMenu") or []
+            for item in primary:
+                href = item.get("href") or item.get("url") or item.get("link") or ""
+                label = (item.get("label") or item.get("title") or "").lower()
+                if href and any(w in label for w in ("buy", "sale", "for sale", "property")):
+                    full = href if href.startswith("http") else f"{_NCO_BASE}{href}"
+                    discovered.append(full)
+                    logger.info(f"[99co] top-nav buy link: {full}")
+                # Recurse into submenus
+                for sub in (item.get("subMenu") or item.get("children") or item.get("items") or []):
+                    sub_href = sub.get("href") or sub.get("url") or sub.get("link") or ""
+                    sub_label = (sub.get("label") or sub.get("title") or "").lower()
+                    if sub_href and any(
+                        w in sub_label for w in ("buy", "condo", "apartment", "property", "sale", "residential")
+                    ):
+                        full = sub_href if sub_href.startswith("http") else f"{_NCO_BASE}{sub_href}"
+                        discovered.append(full)
+                        logger.info(f"[99co] top-nav submenu link: {full}")
+    except Exception as e:
+        logger.info(f"[99co] top-nav fetch failed: {e}")
+    return discovered
 
 
 def _html_has_listings(html: str) -> bool:
@@ -98,15 +134,21 @@ def _extract_listings_from_html(html: str) -> list[dict]:
     if rsc_chunks:
         logger.info(f"[99co] Found {len(rsc_chunks)} RSC payload chunks")
         combined = "\n".join(rsc_chunks)
-        # Un-escape JSON string escapes
-        try:
-            combined = combined.encode().decode("unicode_escape")
-        except Exception:
-            pass
-        # Look for JSON arrays that contain listing-like objects
+        # Try direct scan first (chunks are already unescaped strings)
         results = _scan_for_listing_arrays(combined)
         if results:
             return results
+        # Try unicode_escape decode (some chunks are double-escaped)
+        try:
+            decoded = combined.encode("utf-8").decode("unicode_escape", errors="replace")
+            results = _scan_for_listing_arrays(decoded)
+            if results:
+                return results
+        except Exception:
+            pass
+        # Log a snippet to help diagnose RSC structure
+        snippet = combined[:500].replace("\n", " ")
+        logger.info(f"[99co] RSC combined snippet: {snippet}")
 
     # 3. Generic scan: find JSON arrays with listing-shaped objects in all <script> tags
     for m in re.finditer(r'<script[^>]*>(.*?)</script>', html, re.S):
@@ -329,6 +371,8 @@ class NinetyNineScraper(BaseScraper):
             except Exception as e:
                 logger.info(f"[99co-diag] JSON parse failed for {url[:80]}: {e}")
 
+        search_urls = _discover_search_urls() + _SEARCH_PAGE_URLS_BASE
+
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(
@@ -347,7 +391,7 @@ class NinetyNineScraper(BaseScraper):
                     "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
                 )
 
-                for search_url in _SEARCH_PAGE_URLS:
+                for search_url in search_urls:
                     logger.info(f"[99co] Trying page: {search_url}")
                     try:
                         resp = pg.goto(search_url, wait_until="load", timeout=60_000)
